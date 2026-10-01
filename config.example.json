@@ -1,0 +1,22 @@
+{
+  "phonePort": 7420,
+  "adminPort": 7421,
+  "listenHost": "127.0.0.1",
+  "pollIntervalMs": 5000,
+  "approvalSeconds": 60,
+  "alertDelaySeconds": 30,
+  "recentHours": 12,
+  "staleRetentionHours": 24,
+  "endedRetentionMinutes": 30,
+  "claudeCommand": "claude",
+  "codexCommand": "codex",
+  "tray": true,
+  "publicUrl": "",
+  "vapidSubject": "mailto:auto-detect-agent@example.com",
+  "dryRun": false,
+  "defaults": {
+    "keepAwake": "off",
+    "stuckMinutes": 15,
+    "autoReconnect": false
+  }
+}

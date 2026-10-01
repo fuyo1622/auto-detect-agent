@@ -1,0 +1,33 @@
+{
+  "name": "auto-detect-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Watch Claude Code and Codex sessions on this PC and reconnect them from an iPhone.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "start:bg": "node src/main.ts --background",
+    "stop": "node src/cli.ts stop",
+    "pair": "node src/cli.ts pair",
+    "status": "node src/cli.ts status",
+    "check": "tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\"",
+    "icons": "node scripts/make-icons.ts",
+    "autostart:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-autostart.ps1",
+    "autostart:remove": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/uninstall-autostart.ps1",
+    "tailscale:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-tailscale.ps1"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "@types/qrcode": "^1.5.6",
+    "@types/web-push": "^3.6.4",
+    "typescript": "^7.0.2"
+  }
+}
