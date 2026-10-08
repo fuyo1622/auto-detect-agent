@@ -113,6 +113,8 @@ export class Actions extends EventEmitter {
         steps.push({
           describe: `Close the ${name} (process ${proc.pid} and its children)`,
           run: async () => {
+            // Its sessions close on purpose: show them as "Stopped", not as crashes, until they run again.
+            for (const s of this.monitor.sessions) if (s.tool === which && s.host === 'desktop' && s.alive) this.monitor.markStopped(s.key);
             if (!(await killTree(proc.pid, 20000))) throw new Error(`The ${name} did not close.`);
             await sleep(1500);
           },

@@ -30,7 +30,7 @@ What you still need to do (about 10 minutes):
 | **Looks stuck** | Working, but no transcript writes and no CPU use (from the session or what it started) for 15 minutes. You can change this in Settings. | **Reconnect** / **Restart** |
 | **Needs you** | A tool call is waiting with nothing running behind it, which usually means it needs your approval or answer. Codex approval requests are shown directly. | **Open in Claude** and approve |
 | **Stopped unexpectedly** | The process disappeared without Claude cleaning up, or it died while working. | **Resume** |
-| Working / Waiting for you / Closed | Normal states. A session you close with **Stop** or **Reconnect** shows as Closed, not as a crash. | |
+| Working / Waiting for you / Closed | Normal states. A session you close with **Stop**, **Reconnect** or an app restart shows as Closed, not as a crash. | |
 
 ## What the buttons do
 

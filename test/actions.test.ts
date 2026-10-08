@@ -122,3 +122,25 @@ test('a failed Codex command reports its error line, not its progress line', () 
   assert.equal(errorLine('step 1\nstep 2 failed\n'), 'step 2 failed');
   assert.equal(errorLine(''), '');
 });
+
+test('closing the Claude app marks its sessions as stopped on purpose, not as crashes', async () => {
+  const app = spawn('ping.exe', ['-n', '60', '127.0.0.1'], { windowsHide: true, stdio: 'ignore' });
+  await new Promise((r) => app.once('spawn', r));
+  const marks: string[] = [];
+  const view = (key: string, tool: string, host: string) => ({ key, tool, host, alive: true, busy: false }) as SessionView;
+  const monitor = {
+    sessions: [view('claude:app-1', 'claude', 'desktop'), view('claude:cli-1', 'claude', 'cli'), view('codex:app-1', 'codex', 'desktop')],
+    appIds: {},
+    desktopProcess: (which: string) => (which === 'claude' ? { pid: app.pid } : undefined),
+    refreshSoon: () => {},
+    markStopped: (k: string) => marks.push(k),
+  } as unknown as Monitor;
+  try {
+    const r = await new Actions(cfg, monitor, store, log).app('claude-desktop', 'stop', { by: 'test' });
+    assert.equal(r.ok, true, r.message);
+    assert.equal(isAlive(app.pid!), false);
+    assert.deepEqual(marks, ['claude:app-1'], 'only the Claude app sessions, not terminal or Codex ones');
+  } finally {
+    app.kill();
+  }
+});
