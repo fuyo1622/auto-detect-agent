@@ -10,6 +10,8 @@
   "scripts": {
     "start": "node src/main.ts",
     "start:bg": "node src/main.ts --background",
+    "dev": "node --env-file=scripts/dev.env src/main.ts",
+    "dev:status": "node --env-file=scripts/dev.env src/cli.ts status",
     "stop": "node src/cli.ts stop",
     "pair": "node src/cli.ts pair",
     "status": "node src/cli.ts status",

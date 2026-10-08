@@ -155,3 +155,8 @@ test('only interactive, top-level codex processes count as CLI sessions', () => 
     [10, 14, 15],
   );
 });
+
+test('a tool call with no readable input is shown by its name once', () => {
+  const s = claude([toolUse(1, 'm1', 'mcp__Claude_Browser__browser_batch', { actions: [{ name: 'computer' }] })]);
+  assert.equal(s.pending.get('m1')?.summary, '');
+});

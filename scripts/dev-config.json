@@ -1,0 +1,7 @@
+{
+  "phonePort": 17420,
+  "adminPort": 17421,
+  "dryRun": true,
+  "tray": false,
+  "paths": { "data": "data-dev" }
+}

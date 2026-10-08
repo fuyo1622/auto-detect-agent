@@ -21,6 +21,9 @@ export interface HealthResult {
 /** Tools that legitimately run for a long time without starting a process. */
 const LONG_RUNNING_TOOLS = /^(Agent|Task|TaskOutput|TaskStop|Monitor|ScheduleWakeup|SendMessage|WebSearch|WebFetch|ToolSearch|Skill|Workflow|Sleep)$/;
 
+/** A session that just started is still registering and connecting Remote Control. */
+export const RC_GRACE_MS = 30_000;
+
 export function approvalDetail(name: string, summary: string): string {
   if (name === 'AskUserQuestion') return 'Asking you a question';
   if (name === 'ExitPlanMode') return 'Waiting for you to approve the plan';
@@ -38,6 +41,7 @@ export function deriveHealth(f: SessionFacts, ctx: HealthContext): HealthResult 
   const { now } = ctx;
 
   if (!f.alive) {
+    if (f.stoppedByUser) return { health: 'ended', detail: 'Stopped', activity: 'ended', activityDetail: 'Stopped', notify: false };
     const crashed = f.staleRecord && (f.host === 'cli' || f.lastKnownBusy);
     if (crashed) {
       const detail = f.lastKnownBusy ? 'Stopped while it was working' : 'The process ended without closing the session';
@@ -79,7 +83,8 @@ export function deriveHealth(f: SessionFacts, ctx: HealthContext): HealthResult 
     activityDetail = 'Waiting for your next message';
   }
 
-  if (f.rcExpected && f.rcState !== 'on') {
+  const starting = f.procStartMs !== undefined && now - f.procStartMs < RC_GRACE_MS;
+  if (f.rcExpected && f.rcState !== 'on' && !starting) {
     const detail =
       f.rcState === 'unknown'
         ? 'Claude no longer lists this session, so Remote Control is probably disconnected'

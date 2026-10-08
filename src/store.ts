@@ -19,6 +19,10 @@ export interface StoreData {
   settings: Settings;
   /** Session key -> when the user dismissed it. */
   dismissed: Record<string, number>;
+  /** Session key -> when Stop / Reconnect closed it from here (shown as "Stopped", not as a crash). */
+  stopped: Record<string, number>;
+  /** Claude session records ("pid:procStart") left by a process whose conversation went on in a newer one. */
+  superseded: Record<string, number>;
 }
 
 export class Store {
@@ -35,6 +39,8 @@ export class Store {
       devices: loaded?.devices ?? [],
       settings: { ...defaults, ...(loaded?.settings ?? {}) },
       dismissed: loaded?.dismissed ?? {},
+      stopped: loaded?.stopped ?? {},
+      superseded: loaded?.superseded ?? {},
     };
   }
 

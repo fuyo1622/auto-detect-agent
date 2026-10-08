@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import type { Config } from './config.ts';
 import { describeLaunch, isAlive, killTree, launchInTerminal, launchPackagedApp } from './launch.ts';
 import type { Logger } from './log.ts';
@@ -69,6 +70,8 @@ export class Actions extends EventEmitter {
       steps.push(this.killStep(f));
     } else {
       if (!resume) return { ok: false, message: "I don't know which folder this session ran in, so I can't reopen it." };
+      // Check before closing anything: a reconnect that cannot reopen would just end the session.
+      if (!fs.existsSync(resume.cwd)) return { ok: false, message: `Can't reopen it: the folder ${resume.cwd} is not reachable. Nothing was closed.` };
       if (action === 'reconnect') {
         if (f.alive && f.phase === 'busy' && !req.force) {
           return confirm('It is still working. Reconnecting stops the current step (the conversation is kept). Continue?');
@@ -84,9 +87,7 @@ export class Actions extends EventEmitter {
       action === 'stop'
         ? 'Stopped.'
         : f.tool === 'claude'
-          ? f.host === 'desktop' && action === 'reconnect'
-            ? 'Moved to Windows Terminal with Remote Control on. The Claude app will show it as disconnected.'
-            : 'Reopened in Windows Terminal with Remote Control on. It appears here in a few seconds.'
+          ? 'Reopened in Windows Terminal with Remote Control on. It appears here in a few seconds.'
           : 'Reopened in Windows Terminal.';
     return this.execute(key, label, steps, done, req);
   }
@@ -134,7 +135,7 @@ export class Actions extends EventEmitter {
       describe: `Run: codex ${args.join(' ')}`,
       run: async () => {
         const r = await runDetached(codex, args, waitMs);
-        if (r.exited && r.code !== 0) throw new Error(firstLine(r.output) || `codex ${args.join(' ')} failed (${r.code})`);
+        if (r.exited && r.code !== 0) throw new Error(errorLine(r.output) || `codex ${args.join(' ')} failed (${r.code})`);
       },
     });
     if (action === 'start') steps.push(run(['remote-control', 'start'], 30000));
@@ -151,6 +152,7 @@ export class Actions extends EventEmitter {
     return {
       describe: `Close process ${pid} and anything it started`,
       run: async () => {
+        this.monitor.markStopped(f.key); // closed on purpose: show "Stopped", not a crash
         if (!isAlive(pid)) return;
         if (!(await killTree(pid))) throw new Error(`Process ${pid} did not close.`);
       },
@@ -187,8 +189,10 @@ function confirm(message: string): ActionResult {
   return { ok: false, needsConfirm: true, message };
 }
 
-function firstLine(s: string): string {
-  return s.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+/** The line that explains a failed command: its first "Error..." line, else its last line (not a progress line). */
+export function errorLine(s: string): string {
+  const lines = s.split('\n').map((l) => l.trim()).filter(Boolean);
+  return lines.find((l) => /^error\b/i.test(l)) ?? lines[lines.length - 1] ?? '';
 }
 
 /**

@@ -186,7 +186,7 @@ export class Servers {
       const m = r.pattern.exec(url.pathname);
       if (m) {
         route = r;
-        params = m.slice(1).map((p) => decodeURIComponent(p));
+        params = m.slice(1).map(decodePart);
         break;
       }
     }
@@ -280,7 +280,11 @@ export class Servers {
         return publicDevice(c.device!);
       }),
       r('POST', /^\/api\/push\/test$/, 'any', async (c) => {
-        const payload = { title: 'Agent Monitor', body: `Test notification from ${os.hostname()}.`, tag: 'test', url: '/' };
+        // Point the test at a real session, so tapping it also checks that alerts open the right session.
+        const s = d.monitor.sessions[0];
+        const payload = s
+          ? { title: 'Agent Monitor', body: `Test notification from ${os.hostname()}. Tap it to open “${s.title}”.`, tag: 'test', url: `/#s=${encodeURIComponent(s.key)}` }
+          : { title: 'Agent Monitor', body: `Test notification from ${os.hostname()}.`, tag: 'test', url: '/' };
         const result = c.device ? await d.notifier.send('system', payload, c.device) : await d.notifier.send('system', payload);
         if (!result.sent && !result.failed) throw new HttpError(400, c.device ? 'Notifications are not turned on for this phone.' : 'No phone has notifications turned on.');
         return result;
@@ -351,7 +355,7 @@ export class Servers {
 
   private serveStatic(res: http.ServerResponse, pathname: string): void {
     const root = this.d.cfg.paths.web;
-    let rel = decodeURIComponent(pathname);
+    let rel = decodePart(pathname);
     if (rel === '/' || rel === '') rel = '/index.html';
     const file = path.normalize(path.join(root, rel));
     if (!file.startsWith(root + path.sep)) throw new HttpError(404, 'Not found');
@@ -364,6 +368,15 @@ export class Servers {
     const type = TYPES[path.extname(file).toLowerCase()] ?? 'application/octet-stream';
     res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache', 'Content-Length': data.length });
     res.end(data);
+  }
+}
+
+/** decodeURIComponent, but a malformed %-sequence is the client's mistake (400), not a server error. */
+function decodePart(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    throw new HttpError(400, 'Bad request');
   }
 }
 

@@ -47,5 +47,6 @@ export function toolSummary(name: string, input: any): string {
     input.prompt ??
     Object.values(input).find((v) => typeof v === 'string');
   if (Array.isArray(pick)) return truncate(pick.join(' '), 160);
-  return typeof pick === 'string' ? truncate(pick, 160) : name;
+  // Nothing readable (e.g. an MCP call with only structured input): the tool name alone says it.
+  return typeof pick === 'string' ? truncate(pick, 160) : '';
 }

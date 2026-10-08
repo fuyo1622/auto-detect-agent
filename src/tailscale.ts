@@ -74,7 +74,8 @@ export class Tailscale {
       state = j.BackendState;
       dnsName = typeof j.Self?.DNSName === 'string' ? j.Self.DNSName.replace(/\.$/, '') : undefined;
     } catch {
-      state = st.stdout.trim().split('\n')[0] || st.error;
+      // e.g. "failed to connect to local tailscaled" when the Tailscale service is not running.
+      state = st.stdout.trim().split('\n')[0] || st.stderr.trim().split('\n')[0] || st.error;
     }
     const running = state === 'Running';
     let serving = false;

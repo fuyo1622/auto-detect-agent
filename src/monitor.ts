@@ -66,7 +66,7 @@ export class Monitor extends EventEmitter {
     this.store = store;
     this.helper = helper;
     this.log = log;
-    this.claude = new ClaudeSource(cfg);
+    this.claude = new ClaudeSource(cfg, store.data.superseded, () => store.save());
     this.codex = new CodexSource(cfg);
   }
 
@@ -92,6 +92,12 @@ export class Monitor extends EventEmitter {
 
   desktopProcess(app: 'claude' | 'codex'): ProcInfo | undefined {
     return this.desktop[app];
+  }
+
+  /** Remember that the session's process is being closed on purpose (kept until it runs again). */
+  markStopped(key: string): void {
+    this.store.data.stopped[key] = Date.now();
+    this.store.save();
   }
 
   /** Ask the Codex daemon for its status again on the next scan. */
@@ -157,9 +163,28 @@ export class Monitor extends EventEmitter {
     const ctxBase = { now, stuckMs: settings.stuckMinutes * 60000, approvalMs: this.cfg.approvalSeconds * 1000 };
     const next = new Map<string, Tracked>();
     const transitions: Transition[] = [];
+    const liveProcs = new Set<string>();
 
+    const stopped = this.store.data.stopped;
+    for (const [key, at] of Object.entries(stopped)) {
+      if (now - at > this.cfg.staleRetentionHours * 3600_000) {
+        delete stopped[key];
+        this.store.save();
+      }
+    }
     for (const f of facts) {
       const prev = this.tracked.get(f.key);
+      const stoppedAt = stopped[f.key];
+      if (f.alive) {
+        if (f.pid !== undefined) liveProcs.add(`${f.pid}:${f.procStartMs}`);
+        // Running again in a process started after the stop: forget it.
+        if (stoppedAt !== undefined && (f.procStartMs ?? 0) > stoppedAt) {
+          delete stopped[f.key];
+          this.store.save();
+        }
+      } else if (stoppedAt !== undefined) {
+        f.stoppedByUser = true;
+      }
       const cpuActiveAt = this.trackCpu(f, now);
       const h = deriveHealth(f, { ...ctxBase, cpuActiveAt });
       const view: SessionView = {
@@ -199,6 +224,8 @@ export class Monitor extends EventEmitter {
         if (t.expiresAt > now) next.set(key, t);
         continue;
       }
+      // Same process, new key (Claude registered it, or its transcript appeared): not a closed session.
+      if (t.facts.alive && t.facts.pid !== undefined && liveProcs.has(`${t.facts.pid}:${t.facts.procStartMs}`)) continue;
       const facts: SessionFacts = { ...t.facts, alive: false, staleRecord: false, phase: 'unknown', children: [] };
       const view: SessionView = {
         ...t.view,
@@ -310,10 +337,14 @@ export function findClaudeDesktop(snap: Snapshot): ProcInfo | undefined {
 export function actionsFor(f: SessionFacts, appIds: { claude?: string; codex?: string }): SessionAction[] {
   const out: SessionAction[] = [];
   const appId = f.tool === 'claude' ? appIds.claude : appIds.codex;
+  // The Claude app reopens a session's process by itself when it closes, and its scratch folders exist only
+  // inside the app's own view of the disk. A terminal copy would run the conversation twice, so app sessions
+  // are fixed by restarting the app instead.
+  const claudeApp = f.tool === 'claude' && f.host === 'desktop';
   if (f.alive) {
-    if (f.tool === 'claude' || f.host === 'cli') {
+    if (f.host === 'cli') {
       if (f.resume) out.push('reconnect');
-    } else if (f.resume) {
+    } else if (!claudeApp && f.resume) {
       out.push('open-terminal');
     }
     if (f.host === 'desktop') {
@@ -322,7 +353,7 @@ export function actionsFor(f: SessionFacts, appIds: { claude?: string; codex?: s
       out.push('stop');
     }
   } else {
-    if (f.resume) out.push('resume');
+    if (f.resume && !claudeApp) out.push('resume');
     if (f.host === 'desktop' && appId && f.appRunning === false) out.push('start-app');
     out.push('dismiss');
   }

@@ -69,6 +69,8 @@ export interface SessionFacts {
   staleRecord: boolean;
   /** For gone sessions: was it working when it went away? */
   lastKnownBusy: boolean;
+  /** Gone because you stopped it (Stop / Reconnect), so it is not a crash. */
+  stoppedByUser?: boolean;
   rcExpected: boolean;
   rcState: RcState;
   rcUrl?: string;

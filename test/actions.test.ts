@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { Actions } from '../src/actions.ts';
+import { Actions, errorLine } from '../src/actions.ts';
 import { loadConfig } from '../src/config.ts';
 import { isAlive } from '../src/launch.ts';
 import { createLogger } from '../src/log.ts';
@@ -14,6 +14,8 @@ import type { SessionFacts, SessionView } from '../src/types.ts';
 const cfg = loadConfig(path.join(os.tmpdir(), 'no-config.json'));
 const log = createLogger(undefined, false);
 const store = new Store(path.join(os.tmpdir(), `agent-monitor-test-${process.pid}.json`), cfg.defaults);
+
+const stopped: string[] = [];
 
 function session(over: Partial<SessionFacts>, actions: SessionView['actions']) {
   const facts: SessionFacts = {
@@ -42,6 +44,7 @@ function session(over: Partial<SessionFacts>, actions: SessionView['actions']) {
     desktopProcess: () => undefined,
     refreshSoon: () => {},
     recheckDaemon: () => {},
+    markStopped: (k: string) => stopped.push(k),
   } as unknown as Monitor;
   return new Actions(cfg, monitor, store, log);
 }
@@ -83,7 +86,7 @@ test('resume reports a missing folder instead of launching', async () => {
   );
   const r = await actions.session('claude:test', 'resume', { by: 'test' });
   assert.equal(r.ok, false);
-  assert.match(r.message, /Folder not found/);
+  assert.match(r.message, /not reachable/);
 });
 
 test('stop really ends the process tree', async () => {
@@ -95,4 +98,27 @@ test('stop really ends the process tree', async () => {
   assert.equal(r.ok, true, r.message);
   assert.equal(isAlive(dummy.pid!), false);
   assert.equal(actions.history[0]?.ok, true);
+  assert.deepEqual(stopped, ['claude:test'], 'remembered as stopped on purpose, not a crash');
+});
+
+test('reconnect checks the folder before closing anything', async () => {
+  const dummy = spawn('ping.exe', ['-n', '60', '127.0.0.1'], { windowsHide: true, stdio: 'ignore' });
+  await new Promise((r) => dummy.once('spawn', r));
+  try {
+    const missing = path.join(os.tmpdir(), 'definitely-missing-folder-xyz');
+    const actions = session({ pid: dummy.pid, resume: { cwd: missing, title: 't', command: ['claude'] } }, ['reconnect', 'stop']);
+    const r = await actions.session('claude:test', 'reconnect', { by: 'test' });
+    assert.equal(r.ok, false);
+    assert.match(r.message, /Nothing was closed/);
+    assert.equal(isAlive(dummy.pid!), true, 'the session keeps running');
+  } finally {
+    dummy.kill();
+  }
+});
+
+test('a failed Codex command reports its error line, not its progress line', () => {
+  const out = 'Starting app-server daemon with remote control enabled...\r\nError: host Job Object prevents daemon detachment; start from a host that allows breakaway\r\n';
+  assert.equal(errorLine(out), 'Error: host Job Object prevents daemon detachment; start from a host that allows breakaway');
+  assert.equal(errorLine('step 1\nstep 2 failed\n'), 'step 2 failed');
+  assert.equal(errorLine(''), '');
 });

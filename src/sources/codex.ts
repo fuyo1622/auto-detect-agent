@@ -5,14 +5,19 @@ import type { Config } from '../config.ts';
 import type { ProcInfo, Snapshot } from '../proc/helper.ts';
 import type { LastMessage, Phase, SessionFacts } from '../types.ts';
 import { baseName, flagValue, normPath, readdirSafe, splitCommandLine, statSafe, truncate, UUID_RE } from '../util.ts';
-import { childProcs, newest } from './common.ts';
+import { childProcs, maxDefined, newest } from './common.ts';
 import { FollowerCache, readFirstLine } from './jsonl.ts';
 
 export interface RolloutMeta {
   id: string;
   cwd?: string;
   originator?: string;
+  /** "cli", "vscode" (the Codex app), "exec", ...; subagent threads have an object here instead. */
   source?: string;
+  /** A helper thread (spawned agent, approval reviewer) working for another thread, not something you started. */
+  subagent: boolean;
+  /** For subagents: the thread they work for. */
+  parentId?: string;
   startedAt?: number;
 }
 
@@ -124,6 +129,7 @@ export class CodexSource {
     this.followers.prune();
     this.refreshNames();
     const files = this.listRollouts(now);
+    const helperActivity = subagentActivity(files);
     const facts: SessionFacts[] = [];
     const claimed = new Set<string>();
 
@@ -131,7 +137,7 @@ export class CodexSource {
       const args = splitCommandLine(proc.cmd ?? '').slice(1);
       const rollout = this.matchProcess(proc, args, files, claimed);
       if (rollout?.meta) claimed.add(rollout.meta.id);
-      facts.push(this.cliFacts(snap, proc, rollout));
+      facts.push(this.cliFacts(snap, proc, rollout, rollout?.meta && helperActivity.get(rollout.meta.id)));
     }
 
     const desktopRunning = !!desktopMain;
@@ -140,15 +146,17 @@ export class CodexSource {
     const staleWindow = now - this.cfg.staleRetentionHours * 3600_000;
     for (const f of files) {
       const meta = f.meta;
-      if (!meta || claimed.has(meta.id) || meta.source === 'exec') continue;
+      // Helper threads show up as activity of the thread they work for, not as sessions of their own.
+      if (!meta || meta.subagent || claimed.has(meta.id) || meta.source === 'exec') continue;
       const desktop = isDesktopRollout(meta);
       const st = this.followers.get(f.file)?.state;
       const busy = st?.phase === 'busy';
+      const helpersAt = helperActivity.get(meta.id);
       if (desktop && desktopRunning) {
-        if (f.mtimeMs < recent) continue;
-        facts.push(this.threadFacts(f, st, 'desktop', true, desktopRunning));
+        if (Math.max(f.mtimeMs, helpersAt ?? 0) < recent) continue;
+        facts.push(this.threadFacts(f, st, 'desktop', true, desktopRunning, helpersAt));
       } else if (f.mtimeMs >= endedWindow || (busy && f.mtimeMs >= staleWindow)) {
-        facts.push(this.threadFacts(f, st, desktop ? 'desktop' : 'cli', false, desktopRunning));
+        facts.push(this.threadFacts(f, st, desktop ? 'desktop' : 'cli', false, desktopRunning, helpersAt));
       }
     }
     return facts;
@@ -186,7 +194,7 @@ export class CodexSource {
     );
   }
 
-  private cliFacts(snap: Snapshot, proc: ProcInfo, rollout: RolloutFile | undefined): SessionFacts {
+  private cliFacts(snap: Snapshot, proc: ProcInfo, rollout: RolloutFile | undefined, helpersAt: number | undefined): SessionFacts {
     const st = rollout ? this.followers.get(rollout.file)?.state : undefined;
     const meta = rollout?.meta;
     const cwd = meta?.cwd ?? proc.cwd;
@@ -205,7 +213,7 @@ export class CodexSource {
       alive: true,
       phase: st?.phase === 'unknown' || !st ? 'idle' : st.phase,
       startedAt: proc.startMs,
-      lastActivityAt: rollout?.mtimeMs,
+      lastActivityAt: maxDefined(rollout?.mtimeMs, helpersAt),
       registered: null,
       staleRecord: false,
       lastKnownBusy: st?.phase === 'busy',
@@ -221,7 +229,14 @@ export class CodexSource {
     };
   }
 
-  private threadFacts(f: RolloutFile, st: RolloutState | undefined, host: 'cli' | 'desktop', alive: boolean, appRunning: boolean): SessionFacts {
+  private threadFacts(
+    f: RolloutFile,
+    st: RolloutState | undefined,
+    host: 'cli' | 'desktop',
+    alive: boolean,
+    appRunning: boolean,
+    helpersAt: number | undefined,
+  ): SessionFacts {
     const meta = f.meta!;
     const folder = baseName(meta.cwd);
     const title = this.names.get(meta.id) ?? (st?.lastUser ? truncate(st.lastUser.text, 60) : undefined) ?? folder ?? 'Codex thread';
@@ -236,7 +251,7 @@ export class CodexSource {
       alive,
       phase: alive ? phase : 'unknown',
       startedAt: meta.startedAt,
-      lastActivityAt: f.mtimeMs,
+      lastActivityAt: maxDefined(f.mtimeMs, helpersAt),
       registered: null,
       staleRecord: !alive && phase === 'busy',
       lastKnownBusy: phase === 'busy',
@@ -268,7 +283,7 @@ export class CodexSource {
     let best: RolloutFile | undefined;
     for (const f of files) {
       const m = f.meta;
-      if (!m || claimed.has(m.id) || isDesktopRollout(m) || normPath(m.cwd) !== cwd) continue;
+      if (!m || m.subagent || claimed.has(m.id) || isDesktopRollout(m) || normPath(m.cwd) !== cwd) continue;
       if (f.mtimeMs < since) continue;
       if (!resumingLast && (m.startedAt ?? 0) < since) continue;
       if (!best || f.mtimeMs > best.mtimeMs) best = f;
@@ -322,7 +337,15 @@ export class CodexSource {
     const first = readFirstLine(file);
     const p = first?.type === 'session_meta' ? first.payload : undefined;
     const meta: RolloutMeta | null = p?.id
-      ? { id: p.id, cwd: p.cwd, originator: p.originator, source: p.source, startedAt: Date.parse(p.timestamp ?? first.timestamp) || undefined }
+      ? {
+          id: p.id,
+          cwd: p.cwd,
+          originator: p.originator,
+          source: typeof p.source === 'string' ? p.source : undefined,
+          subagent: (!!p.source && typeof p.source === 'object') || p.thread_source === 'subagent' || p.thread_source === 'guardian_review',
+          parentId: p.parent_thread_id ?? p.source?.subagent?.thread_spawn?.parent_thread_id ?? (p.session_id && p.session_id !== p.id ? p.session_id : undefined),
+          startedAt: Date.parse(p.timestamp ?? first.timestamp) || undefined,
+        }
       : null;
     // A brand-new file may not have its first line yet; try again next time.
     if (meta) this.metaCache.set(file, meta);
@@ -350,6 +373,20 @@ export class CodexSource {
     }
     this.names = names;
   }
+}
+
+/** Newest write by any helper thread, keyed by the user-started thread it ultimately works for. */
+export function subagentActivity(files: { mtimeMs: number; meta?: RolloutMeta }[]): Map<string, number> {
+  const byId = new Map<string, RolloutMeta>();
+  for (const f of files) if (f.meta) byId.set(f.meta.id, f.meta);
+  const out = new Map<string, number>();
+  for (const f of files) {
+    if (!f.meta?.subagent) continue;
+    let target = f.meta.parentId;
+    for (let hops = 0; target && byId.get(target)?.subagent && hops < 10; hops++) target = byId.get(target)!.parentId;
+    if (target && f.mtimeMs > (out.get(target) ?? 0)) out.set(target, f.mtimeMs);
+  }
+  return out;
 }
 
 export function isDesktopRollout(m: RolloutMeta): boolean {

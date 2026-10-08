@@ -11,7 +11,7 @@ Claude / Codex sessions ──► Agent Monitor ◄── Tailscale (HTTPS, priv
 
 ## Setup
 
-Already done on this PC: dependencies installed, agent running, autostart at sign-in, tray icon.
+Already done on this PC: dependencies installed, autostart at sign-in (the agent and its tray icon start when you sign in to Windows).
 
 What you still need to do (about 10 minutes):
 
@@ -30,15 +30,14 @@ What you still need to do (about 10 minutes):
 | **Looks stuck** | Working, but no transcript writes and no CPU use (from the session or what it started) for 15 minutes. You can change this in Settings. | **Reconnect** / **Restart** |
 | **Needs you** | A tool call is waiting with nothing running behind it, which usually means it needs your approval or answer. Codex approval requests are shown directly. | **Open in Claude** and approve |
 | **Stopped unexpectedly** | The process disappeared without Claude cleaning up, or it died while working. | **Resume** |
-| Working / Waiting for you / Closed | Normal states. | |
+| Working / Waiting for you / Closed | Normal states. A session you close with **Stop** or **Reconnect** shows as Closed, not as a crash. | |
 
 ## What the buttons do
 
-- **Reconnect (Claude, terminal):** closes the process and opens `claude --remote-control --resume <id>` in a new Windows Terminal tab, in the same folder. The conversation is kept, and you're asked to confirm if it's still working.
-- **Move to terminal (Claude app session):** same as Reconnect, so the session continues in Windows Terminal with Remote Control on. The Claude app will show it as disconnected.
+- **Reconnect (Claude, terminal):** closes the process and opens `claude --remote-control --resume <id>` in a new Windows Terminal tab, in the same folder. The conversation is kept, and you're asked to confirm if it's still working. It checks first that the folder can be reached, so it never closes a session it can't reopen.
 - **Restart (Codex, terminal):** closes it and runs `codex resume <id>` in a new tab.
 - **Open in terminal (Codex app thread):** runs `codex resume <id>` in a new tab.
-- **Restart Claude app / Codex app:** closes the app and starts it again (Apps section, or a session's ⋯ menu).
+- **Restart Claude app / Codex app:** closes the app and starts it again (Apps section, or a session's ⋯ menu). This is the fix for Claude app sessions: the app reopens a session's process by itself, so a terminal copy would run the conversation twice.
 - **Codex remote control:** start, restart or stop the Codex app-server daemon (`codex remote-control start`, `codex app-server daemon restart|stop`).
 - **Resume:** reopens a session that is gone.
 - **Open in Claude:** opens the session's claude.ai link (Remote Control) in the Claude app or in Safari.
@@ -62,6 +61,8 @@ npm run autostart:install  start at sign-in (already done)
 npm run autostart:remove   remove autostart and stop the agent
 npm test                   run the tests
 npm run check              type-check
+npm run dev                a dry-run copy on ports 17420/17421 (sees real sessions, never closes or opens anything)
+npm run dev:status         list sessions from that copy
 ```
 
 Logs are in `data\agent.log`, or use the tray icon → Open log.
@@ -77,12 +78,15 @@ Copy `config.example.json` to `config.json` and change what you need. Restart th
 - `recentHours` (12): which Codex app threads are listed
 - `claudeCommand` / `codexCommand`
 - `dryRun`: plan actions without closing or launching anything
+- `paths`: where data, Claude and Codex files are (relative paths are relative to this folder)
+
+To use another config file, set `AGENT_MONITOR_CONFIG` (that is how `npm run dev` uses `scripts/dev-config.json`).
 
 ## How detection works
 
 - **Processes:** `bin\proc-helper.exe` (built from `helper\ProcHelper.cs` with the .NET Framework compiler that ships with Windows) reads every `claude.exe` / `codex.exe` / Codex app process. It gets the command line, working folder, start time, CPU time, and what each process started, in a few milliseconds per scan.
 - **Claude:** `~/.claude/sessions/<pid>.json` is Claude's own list of running sessions (`status` busy/idle, `bridgeSessionId` = Remote Control). Entries are matched to processes by start time, so a recycled pid can't fool it. Transcripts in `~/.claude/projects` provide the last message, pending tool calls and Remote Control links. The Claude app's `claude-code-sessions` records say whether Remote Control should be on.
-- **Codex:** `~/.codex/sessions/**/rollout-*.jsonl` (`task_started` / `task_complete` / approval events), `session_index.jsonl` for thread names, and `codex app-server daemon version` for the daemon.
+- **Codex:** `~/.codex/sessions/**/rollout-*.jsonl` (`task_started` / `task_complete` / approval events), `session_index.jsonl` for thread names, and `codex app-server daemon version` for the daemon. Helper threads (spawned agents, the approval reviewer) are not listed; their activity counts for the thread they work for.
 
 Nothing is sent anywhere except push notifications (through Apple's push service) and the app's own traffic over your tailnet.
 

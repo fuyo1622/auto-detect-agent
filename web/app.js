@@ -144,13 +144,6 @@ function actionInfo(v, action) {
   const rc = v.tool === 'claude' ? ' with Remote Control on' : '';
   switch (action) {
     case 'reconnect':
-      if (v.tool === 'claude' && v.host === 'desktop') {
-        return {
-          label: 'Move to terminal',
-          desc: `Close it in the ${app} and continue the same conversation in Windows Terminal with Remote Control on.`,
-          confirm: `“${v.title}” closes in the Claude app and opens in a new Windows Terminal tab with Remote Control on. The conversation is kept.`,
-        };
-      }
       return {
         label: v.tool === 'claude' ? 'Reconnect' : 'Restart',
         desc: `Close this process and reopen the same conversation in a new Windows Terminal tab${rc}.`,
@@ -343,6 +336,38 @@ function setState(st) {
   if (!wasLive) renderHeader();
   if (sig === S.sig) return;
   S.sig = sig;
+  liveRender();
+}
+
+// Live updates redraw the list and the open sheet. A tap that lands while the button under the
+// finger is being replaced is lost, so hold those redraws while a finger (or mouse button) is down.
+let pressing = false;
+let pressEndedAt = 0;
+let deferred = false;
+
+function holding() {
+  return pressing || Date.now() - pressEndedAt < 400;
+}
+
+document.addEventListener('pointerdown', () => (pressing = true), true);
+for (const type of ['pointerup', 'pointercancel']) {
+  document.addEventListener(
+    type,
+    () => {
+      pressing = false;
+      pressEndedAt = Date.now();
+      if (deferred) setTimeout(liveRender, 450); // after the click has been handled
+    },
+    true,
+  );
+}
+
+function liveRender() {
+  if (holding()) {
+    deferred = true;
+    return;
+  }
+  deferred = false;
   renderHeader();
   renderTabs();
   if (S.tab === 'sessions') renderMain();
@@ -362,7 +387,7 @@ document.addEventListener('visibilitychange', () => {
 });
 addEventListener('online', () => paired() && connect());
 setInterval(() => {
-  if (!paired()) return;
+  if (!paired() || holding()) return;
   renderHeader();
   if (S.tab === 'sessions' && !S.sheet) renderMain();
 }, 30000);

@@ -126,3 +126,15 @@ test('Codex approval requests are surfaced directly', () => {
   assert.equal(h.health, 'approval');
   assert.match(h.detail, /npm publish/);
 });
+
+test('a session closed from Agent Monitor (Stop, Reconnect) is "Stopped", not a crash, and never pushed', () => {
+  const gone = { alive: false, phase: 'unknown' as const, rcState: 'n/a' as const, staleRecord: true, lastKnownBusy: true, rcExpected: true };
+  const h = deriveHealth(facts({ ...gone, stoppedByUser: true }), ctx);
+  assert.deepEqual([h.health, h.detail, h.notify], ['ended', 'Stopped', false]);
+});
+
+test('a session that just started gets 30 s to connect Remote Control', () => {
+  assert.equal(deriveHealth(facts({ rcState: 'off', procStartMs: NOW - 10_000 }), ctx).health, 'waiting');
+  assert.equal(deriveHealth(facts({ rcState: 'unknown', registered: false, procStartMs: NOW - 10_000 }), ctx).health, 'waiting');
+  assert.equal(deriveHealth(facts({ rcState: 'off', procStartMs: NOW - 31_000 }), ctx).health, 'rc-lost');
+});

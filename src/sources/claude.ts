@@ -52,6 +52,9 @@ export interface TranscriptState {
   permissionMode?: string;
 }
 
+/** How soon to look for new ~/.claude/projects folders when a transcript is missing. */
+const RELIST_MS = 5000;
+
 const CLI_SUBCOMMANDS = new Set([
   'agents', 'attach', 'auth', 'auto-mode', 'doctor', 'gateway', 'import', 'install', 'logs', 'mcp', 'plugin',
   'plugins', 'project', 'respawn', 'rm', 'setup-token', 'stop', 'kill', 'ultrareview', 'update', 'upgrade',
@@ -164,9 +167,14 @@ export class ClaudeSource {
   private readonly desktopMetaFiles = new Map<string, { mtimeMs: number; meta: DesktopMeta }>();
   /** Session processes (pid:start) that had Remote Control on at some point. */
   private readonly rcSeen = new Set<string>();
+  private readonly superseded: Record<string, number>;
+  private readonly onSupersededChange: () => void;
 
-  constructor(cfg: Config) {
+  /** `superseded` is kept by the caller (saved to disk) so it survives restarts. */
+  constructor(cfg: Config, superseded: Record<string, number> = {}, onSupersededChange: () => void = () => {}) {
     this.cfg = cfg;
+    this.superseded = superseded;
+    this.onSupersededChange = onSupersededChange;
   }
 
   readRegistry(): RegistryEntry[] {
@@ -227,10 +235,32 @@ export class ClaudeSource {
       facts.push(this.liveFacts(snap, now, proc, args, desktop, undefined, sessionId));
     }
 
-    // Registry entries whose process is gone: crashed or killed without cleanup.
+    // A conversation that goes on in a newer process makes the records of its older processes history:
+    // they must not come back as a crash once that newer process exits normally.
     const retention = this.cfg.staleRetentionHours * 3600_000;
-    for (const reg of registry) {
-      if (linked.has(reg) || reg.spare || !reg.sessionId || claimed.has(reg.sessionId)) continue;
+    let changed = false;
+    for (const f of facts) {
+      if (!f.sessionId || f.procStartMs === undefined) continue;
+      for (const reg of registry) {
+        if (reg.sessionId !== f.sessionId || linked.has(reg) || this.superseded[recordId(reg)]) continue;
+        if ((fileTimeToMs(reg.procStart) ?? reg.startedAt ?? Infinity) < f.procStartMs) {
+          this.superseded[recordId(reg)] = now;
+          changed = true;
+        }
+      }
+    }
+    for (const [id, at] of Object.entries(this.superseded)) {
+      if (now - at > retention + 3600_000) {
+        delete this.superseded[id];
+        changed = true;
+      }
+    }
+    if (changed) this.onSupersededChange();
+
+    // Registry entries whose process is gone: crashed or killed without cleanup. The newest record speaks for its session.
+    const byNewest = [...registry].sort((a, b) => (b.updatedAt ?? b.startedAt ?? 0) - (a.updatedAt ?? a.startedAt ?? 0));
+    for (const reg of byNewest) {
+      if (linked.has(reg) || reg.spare || !reg.sessionId || claimed.has(reg.sessionId) || this.superseded[recordId(reg)]) continue;
       const updated = reg.updatedAt ?? reg.startedAt ?? 0;
       if (now - updated > retention) continue;
       claimed.add(reg.sessionId);
@@ -406,9 +436,10 @@ export class ClaudeSource {
     this.desktopMeta = next;
   }
 
-  private listProjectDirs(): string[] {
+  /** Folders under ~/.claude/projects, re-read when older than maxAgeMs. */
+  private listProjectDirs(maxAgeMs = 60000): string[] {
     const now = Date.now();
-    if (now - this.projectDirsAt > 60000) {
+    if (now - this.projectDirsAt > maxAgeMs) {
       const root = path.join(this.cfg.paths.claudeHome, 'projects');
       this.projectDirs = readdirSafe(root)
         .filter((d) => d.isDirectory())
@@ -421,21 +452,19 @@ export class ClaudeSource {
   findTranscript(sessionId: string): string | undefined {
     const cached = this.transcriptPaths.get(sessionId);
     if (cached && fs.existsSync(cached)) return cached;
-    for (const dir of this.listProjectDirs()) {
-      const file = path.join(dir, `${sessionId}.jsonl`);
-      if (fs.existsSync(file)) {
-        this.transcriptPaths.set(sessionId, file);
-        return file;
-      }
-    }
-    return undefined;
+    const search = (dirs: string[]) => dirs.map((d) => path.join(d, `${sessionId}.jsonl`)).find((file) => fs.existsSync(file));
+    // Not found: the session may be in a folder Claude has never used, so its projects folder is new.
+    const file = search(this.listProjectDirs()) ?? search(this.listProjectDirs(RELIST_MS));
+    if (file) this.transcriptPaths.set(sessionId, file);
+    return file;
   }
 
   /** Newest transcript in the process's folder written since it started and not owned by another session. */
   private findTranscriptByCwd(cwd: string | undefined, startMs: number | undefined, claimed: Set<string>): string | undefined {
     if (!cwd || !startMs) return undefined;
     const want = normPath(path.join(this.cfg.paths.claudeHome, 'projects', projectSlug(cwd)));
-    const dir = this.listProjectDirs().find((d) => normPath(d) === want);
+    const find = (dirs: string[]) => dirs.find((d) => normPath(d) === want);
+    const dir = find(this.listProjectDirs()) ?? find(this.listProjectDirs(RELIST_MS));
     if (!dir) return undefined;
     let best: { id: string; mtime: number } | undefined;
     for (const f of readdirSafe(dir)) {
@@ -460,6 +489,10 @@ export class ClaudeSource {
     }
     return best;
   }
+}
+
+function recordId(reg: RegistryEntry): string {
+  return `${reg.pid}:${reg.procStart ?? reg.startedAt ?? ''}`;
 }
 
 function sameProcess(reg: RegistryEntry, proc: ProcInfo): boolean {

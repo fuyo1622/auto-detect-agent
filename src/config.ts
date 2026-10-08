@@ -65,7 +65,8 @@ const DEFAULTS: Omit<Config, 'paths'> = {
   defaults: { keepAwake: 'off', stuckMinutes: 15, autoReconnect: false },
 };
 
-export function loadConfig(file = path.join(ROOT, 'config.json')): Config {
+/** AGENT_MONITOR_CONFIG points at another config file (`npm run dev` uses it to run a dry-run copy). */
+export function loadConfig(file = path.resolve(ROOT, process.env.AGENT_MONITOR_CONFIG || 'config.json')): Config {
   const user = readJsonFile<Partial<Config>>(file) ?? {};
   const home = os.homedir();
   const appData = process.env.APPDATA ?? path.join(home, 'AppData', 'Roaming');
@@ -82,6 +83,7 @@ export function loadConfig(file = path.join(ROOT, 'config.json')): Config {
     ...DEFAULTS,
     ...user,
     defaults: { ...DEFAULTS.defaults, ...(user.defaults ?? {}) },
-    paths: { ...defaultPaths, ...(user.paths ?? {}) },
+    // Relative paths in config.json are relative to the project folder.
+    paths: Object.fromEntries(Object.entries({ ...defaultPaths, ...(user.paths ?? {}) }).map(([k, v]) => [k, path.resolve(ROOT, v)])) as Config['paths'],
   };
 }
