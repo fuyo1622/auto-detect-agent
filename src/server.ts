@@ -58,9 +58,9 @@ class HttpError extends Error {
   }
 }
 
-const SESSION_ACTIONS = new Set<SessionAction>(['reconnect', 'resume', 'stop', 'open-terminal', 'restart-app', 'start-app', 'dismiss']);
-const APP_IDS = new Set<AppId>(['claude-desktop', 'codex-desktop', 'codex-daemon']);
-const APP_ACTIONS = new Set<AppAction>(['restart', 'start', 'stop']);
+const SESSION_ACTIONS = new Set<SessionAction>(['reconnect', 'resume', 'restart-app', 'start-app', 'dismiss']);
+const APP_IDS = new Set<AppId>(['claude-desktop']);
+const APP_ACTIONS = new Set<AppAction>(['restart', 'start']);
 const KEEP_AWAKE = new Set<KeepAwakeMode>(['off', 'while-working', 'always']);
 
 const TYPES: Record<string, string> = {
@@ -251,11 +251,6 @@ export class Servers {
           if (!KEEP_AWAKE.has(b.keepAwake)) throw new HttpError(400, 'keepAwake must be off, while-working or always');
           s.keepAwake = b.keepAwake;
         }
-        if (b.stuckMinutes !== undefined) {
-          const n = Number(b.stuckMinutes);
-          if (!Number.isFinite(n) || n < 3 || n > 240) throw new HttpError(400, 'stuckMinutes must be between 3 and 240');
-          s.stuckMinutes = Math.round(n);
-        }
         if (b.autoReconnect !== undefined) s.autoReconnect = !!b.autoReconnect;
         d.store.saveNow();
         d.log.info(`[${c.who}] settings:`, s);
@@ -386,7 +381,7 @@ function publicDevice(d: Device) {
 
 function pickPrefs(p: any) {
   const out: Record<string, boolean> = {};
-  for (const k of ['problems', 'approval', 'finished', 'system']) if (typeof p?.[k] === 'boolean') out[k] = p[k];
+  for (const k of ['problems', 'system']) if (typeof p?.[k] === 'boolean') out[k] = p[k];
   return out;
 }
 

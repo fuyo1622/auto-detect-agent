@@ -3,7 +3,6 @@ import webpush, { type PushSubscription } from 'web-push';
 import type { Config } from './config.ts';
 import { minutes } from './health.ts';
 import type { Logger } from './log.ts';
-import type { Transition } from './monitor.ts';
 import type { Device, Store } from './store.ts';
 import { PROBLEM_HEALTHS, type NotifyPrefs, type SessionView } from './types.ts';
 
@@ -14,17 +13,14 @@ export interface PushPayload {
   url?: string;
 }
 
-export const DEFAULT_PREFS: NotifyPrefs = { problems: true, approval: true, finished: false, system: true };
+export const DEFAULT_PREFS: NotifyPrefs = { problems: true, system: true };
 
 const RATE_WINDOW_MS = 10 * 60 * 1000;
 const RATE_MAX = 30;
-const FINISHED_MIN_WORK_MS = 20000;
 
 const PROBLEM_LABEL: Record<string, string> = {
   dead: 'Stopped unexpectedly',
   'rc-lost': 'Remote Control lost',
-  stuck: 'Looks stuck',
-  approval: 'Needs you',
 };
 
 export class Notifier {
@@ -102,12 +98,12 @@ export class Notifier {
     return { sent, failed };
   }
 
-  /** Called after every scan: alert on problems that have lasted long enough. */
-  onUpdate(sessions: SessionView[]): void {
+  /** Called after every scan: alert on problems that have lasted long enough (except those auto-reconnect handles). */
+  onUpdate(sessions: SessionView[], handledElsewhere: ReadonlySet<string> = new Set()): void {
     const now = Date.now();
     const current = new Set<string>();
     for (const s of sessions) {
-      if (!PROBLEM_HEALTHS.has(s.health) || !s.notify) continue;
+      if (!PROBLEM_HEALTHS.has(s.health) || !s.notify || handledElsewhere.has(s.key)) continue;
       current.add(s.key);
       const id = `${s.health}:${s.healthSince}`;
       if (this.alerted.get(s.key) === id) continue;
@@ -116,22 +112,12 @@ export class Notifier {
         this.alerted.set(s.key, id);
         continue;
       }
-      const delay = s.health === 'approval' ? 0 : this.cfg.alertDelaySeconds * 1000;
-      if (now - s.healthSince < delay) continue;
+      if (now - s.healthSince < this.cfg.alertDelaySeconds * 1000) continue;
       this.alerted.set(s.key, id);
-      void this.send(s.health === 'approval' ? 'approval' : 'problems', problemPayload(s));
+      void this.send('problems', problemPayload(s));
     }
     for (const key of this.alerted.keys()) if (!current.has(key)) this.alerted.delete(key);
     this.initialized = true;
-  }
-
-  /** "Finished" pushes: a session that worked for a while is now waiting for you. */
-  onTransition(t: Transition): void {
-    if (!this.initialized || t.from !== 'working' || t.to !== 'waiting' || !t.previous) return;
-    if (Date.now() - t.previous.healthSince < FINISHED_MIN_WORK_MS) return;
-    const s = t.view;
-    const text = s.lastMessage?.role === 'assistant' ? s.lastMessage.text : 'Finished. Waiting for your next message.';
-    void this.send('finished', { title: `${toolName(s)} · ${s.title}`, body: `Done: ${text}`, tag: s.key, url: sessionUrl(s) });
   }
 
   onWake(sleptMs: number, sessions: SessionView[]): void {
@@ -152,11 +138,7 @@ export class Notifier {
   }
 }
 
-function toolName(s: SessionView): string {
-  return s.tool === 'claude' ? 'Claude' : 'Codex';
-}
-
-function sessionUrl(s: SessionView): string {
+export function sessionUrl(s: { key: string }): string {
   return `/#s=${encodeURIComponent(s.key)}`;
 }
 
@@ -167,7 +149,7 @@ function summary(sessions: SessionView[], problems: number): string {
 
 export function problemPayload(s: SessionView): PushPayload {
   return {
-    title: `${toolName(s)} · ${s.title}`,
+    title: s.title,
     body: `${PROBLEM_LABEL[s.health] ?? s.health}. ${s.detail}`,
     tag: s.key,
     url: sessionUrl(s),

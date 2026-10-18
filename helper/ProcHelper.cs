@@ -2,9 +2,8 @@
 //
 // Reads one command per line on stdin and answers with one JSON line on stdout:
 //   ping                  -> {"ok":true}
-//   snap <a.exe,b.exe>    -> every process with one of those image names, plus all of their
-//                            descendants: pid, ppid, name, start time, CPU time, command line,
-//                            and (for the named processes) executable path and working directory
+//   snap <a.exe,b.exe>    -> every process with one of those image names: pid, ppid, name,
+//                            start time, command line, executable path and working directory
 //   awake <0|1>           -> keep the PC from idle-sleeping (1) or release it (0)
 //   exit
 // Output is pure ASCII (everything else is \u-escaped) so console code pages never matter.
@@ -27,7 +26,6 @@ static class ProcHelper
     const uint ES_SYSTEM_REQUIRED = 0x00000001;
     const int ProcessBasicInformation = 0;
     const int ProcessCommandLineInformation = 60;
-    const int MaxChildCommandLine = 400;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct PROCESSENTRY32W
@@ -86,8 +84,6 @@ static class ProcHelper
         public uint Pid;
         public uint Ppid;
         public string Name;
-        public bool Root;
-        public long Start = -1;
     }
 
     static int Main()
@@ -131,7 +127,7 @@ static class ProcHelper
         HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (string n in namesArg.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries)) names.Add(n.Trim());
 
-        List<Entry> all = new List<Entry>();
+        List<Entry> found = new List<Entry>();
         IntPtr snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (snapshot == new IntPtr(-1)) throw new Win32Exception();
         try
@@ -142,82 +138,31 @@ static class ProcHelper
             {
                 do
                 {
+                    if (e.th32ProcessID == 0 || !names.Contains(e.szExeFile)) continue;
                     Entry x = new Entry();
                     x.Pid = e.th32ProcessID;
                     x.Ppid = e.th32ParentProcessID;
                     x.Name = e.szExeFile;
-                    all.Add(x);
+                    found.Add(x);
                 } while (Process32NextW(snapshot, ref e));
             }
         }
         finally { CloseHandle(snapshot); }
 
-        Dictionary<uint, List<Entry>> children = new Dictionary<uint, List<Entry>>();
-        foreach (Entry x in all)
-        {
-            if (x.Pid == 0) continue;
-            List<Entry> list;
-            if (!children.TryGetValue(x.Ppid, out list)) { list = new List<Entry>(); children[x.Ppid] = list; }
-            list.Add(x);
-        }
-
-        // Walk down from the named processes. A child must be younger than its parent,
-        // otherwise its parent pid was recycled and the link is false.
-        Dictionary<uint, Entry> selected = new Dictionary<uint, Entry>();
-        Queue<Entry> queue = new Queue<Entry>();
-        foreach (Entry x in all)
-        {
-            if (x.Pid != 0 && names.Contains(x.Name)) { x.Root = true; selected[x.Pid] = x; queue.Enqueue(x); }
-        }
-        while (queue.Count > 0)
-        {
-            Entry parent = queue.Dequeue();
-            List<Entry> list;
-            if (!children.TryGetValue(parent.Pid, out list)) continue;
-            long parentStart = StartOf(parent);
-            foreach (Entry c in list)
-            {
-                if (selected.ContainsKey(c.Pid)) continue;
-                long childStart = StartOf(c);
-                if (parentStart > 0 && childStart > 0 && childStart < parentStart) continue;
-                selected[c.Pid] = c;
-                queue.Enqueue(c);
-            }
-        }
-
         StringBuilder sb = new StringBuilder(16384);
         sb.Append("{\"ok\":true,\"now\":").Append(NowMs()).Append(",\"procs\":[");
-        bool first = true;
-        foreach (Entry x in all)
+        for (int i = 0; i < found.Count; i++)
         {
-            if (!selected.ContainsKey(x.Pid)) continue;
-            if (!first) sb.Append(',');
-            first = false;
-            Describe(sb, x);
+            if (i > 0) sb.Append(',');
+            Describe(sb, found[i]);
         }
         return sb.Append("]}").ToString();
-    }
-
-    static long StartOf(Entry x)
-    {
-        if (x.Start != -1) return x.Start;
-        x.Start = 0;
-        IntPtr h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, x.Pid);
-        if (h == IntPtr.Zero) return 0;
-        try
-        {
-            long creation, exit, kernel, user;
-            if (GetProcessTimes(h, out creation, out exit, out kernel, out user)) x.Start = creation;
-        }
-        finally { CloseHandle(h); }
-        return x.Start;
     }
 
     static void Describe(StringBuilder sb, Entry x)
     {
         sb.Append("{\"pid\":").Append(x.Pid).Append(",\"ppid\":").Append(x.Ppid).Append(",\"name\":");
         Str(sb, x.Name);
-        if (x.Root) sb.Append(",\"root\":true");
 
         bool canRead = true;
         IntPtr h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, x.Pid);
@@ -231,28 +176,16 @@ static class ProcHelper
             try
             {
                 long creation, exit, kernel, user;
-                if (GetProcessTimes(h, out creation, out exit, out kernel, out user))
-                {
-                    sb.Append(",\"startFt\":\"").Append(creation).Append('"');
-                    sb.Append(",\"cpuMs\":").Append((kernel + user) / 10000);
-                }
+                if (GetProcessTimes(h, out creation, out exit, out kernel, out user)) sb.Append(",\"startFt\":\"").Append(creation).Append('"');
                 string cmd = CommandLine(h);
-                if (cmd != null)
+                if (cmd != null) { sb.Append(",\"cmd\":"); Str(sb, cmd); }
+                StringBuilder path = new StringBuilder(1024);
+                uint size = (uint)path.Capacity;
+                if (QueryFullProcessImageNameW(h, 0, path, ref size)) { sb.Append(",\"exe\":"); Str(sb, path.ToString()); }
+                if (canRead)
                 {
-                    if (!x.Root && cmd.Length > MaxChildCommandLine) cmd = cmd.Substring(0, MaxChildCommandLine);
-                    sb.Append(",\"cmd\":");
-                    Str(sb, cmd);
-                }
-                if (x.Root)
-                {
-                    StringBuilder path = new StringBuilder(1024);
-                    uint size = (uint)path.Capacity;
-                    if (QueryFullProcessImageNameW(h, 0, path, ref size)) { sb.Append(",\"exe\":"); Str(sb, path.ToString()); }
-                    if (canRead)
-                    {
-                        string cwd = CurrentDirectory(h);
-                        if (cwd != null) { sb.Append(",\"cwd\":"); Str(sb, cwd); }
-                    }
+                    string cwd = CurrentDirectory(h);
+                    if (cwd != null) { sb.Append(",\"cwd\":"); Str(sb, cwd); }
                 }
             }
             finally { CloseHandle(h); }

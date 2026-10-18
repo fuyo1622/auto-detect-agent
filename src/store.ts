@@ -37,7 +37,11 @@ export class Store {
       version: 1,
       vapid: loaded?.vapid,
       devices: loaded?.devices ?? [],
-      settings: { ...defaults, ...(loaded?.settings ?? {}) },
+      // Only known settings: files from older versions may carry ones that no longer exist.
+      settings: {
+        keepAwake: loaded?.settings?.keepAwake ?? defaults.keepAwake,
+        autoReconnect: loaded?.settings?.autoReconnect ?? defaults.autoReconnect,
+      },
       dismissed: loaded?.dismissed ?? {},
       stopped: loaded?.stopped ?? {},
       superseded: loaded?.superseded ?? {},

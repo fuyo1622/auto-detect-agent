@@ -97,24 +97,14 @@ export function launchPackagedApp(aumid: string): Promise<void> {
   return spawnDetached('explorer.exe', [`shell:AppsFolder\\${aumid}`]);
 }
 
-export interface AppIds {
-  claude?: string;
-  codex?: string;
-}
-
-/** Looks up the AppUserModelIDs of the Claude and Codex desktop apps. */
-export async function detectAppIds(): Promise<AppIds> {
+/** Looks up the Claude app's AppUserModelID (e.g. Claude_pzs8sxrjxfjjc!Claude), if it is installed. */
+export async function detectClaudeAppId(): Promise<string | undefined> {
   const script =
-    "$ErrorActionPreference='SilentlyContinue';" +
-    "$o=@{};foreach($n in 'Claude','OpenAI.Codex'){$p=Get-AppxPackage -Name $n|Select-Object -First 1;" +
-    'if($p){$m=$p|Get-AppxPackageManifest;$apps=@($m.Package.Applications.Application);' +
-    "$a=$apps|Where-Object{$_.Executable -match '(Claude|ChatGPT)\\.exe$'}|Select-Object -First 1;if(-not $a){$a=$apps[0]};" +
-    "$o[$n]=$p.PackageFamilyName+'!'+$a.Id}};$o|ConvertTo-Json -Compress";
+    "$ErrorActionPreference='SilentlyContinue';$p=Get-AppxPackage -Name Claude|Select-Object -First 1;" +
+    'if($p){$apps=@(($p|Get-AppxPackageManifest).Package.Applications.Application);' +
+    "$a=$apps|Where-Object{$_.Executable -match 'Claude\\.exe$'}|Select-Object -First 1;if(-not $a){$a=$apps[0]};" +
+    "$p.PackageFamilyName+'!'+$a.Id}";
   const r = await runCli('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], 30000);
-  try {
-    const o = JSON.parse(r.stdout.trim() || '{}');
-    return { claude: o.Claude || undefined, codex: o['OpenAI.Codex'] || undefined };
-  } catch {
-    return {};
-  }
+  const id = r.stdout.trim();
+  return /^[\w.-]+_\w+![\w.-]+$/.test(id) ? id : undefined;
 }

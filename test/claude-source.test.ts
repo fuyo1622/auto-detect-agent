@@ -50,7 +50,7 @@ registry(100, NOW - 3600_000, { sessionId: ID.registered, status: 'idle', entryp
 transcript(ID.registered, [{ type: 'assistant', timestamp: t(5000), message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Done.' }] } }]);
 // 200: registry left behind by a process that no longer exists (it was working).
 registry(200, NOW - 7200_000, { sessionId: ID.stale, status: 'busy', entrypoint: 'cli', bridgeSessionId: 'session_01BBB' });
-// 300: process alive but Claude's registry lost it; its transcript has a pending Bash call.
+// 300: process alive but Claude's registry lost it (Remote Control is probably gone too).
 transcript(ID.unregistered, [
   { type: 'bridge-session', sessionId: ID.unregistered, bridgeSessionId: 'cse_01CCC' },
   { type: 'custom-title', customTitle: 'E2E run' },
@@ -70,9 +70,7 @@ const proc = (pid: number, ppid: number, startMs: number, cmd: string, extra: ob
   pid,
   ppid,
   name: 'claude.exe',
-  root: true,
   startFt: ft(startMs),
-  cpuMs: 1000,
   exe: CLI_EXE,
   cwd: workDir,
   cmd,
@@ -85,10 +83,9 @@ const snap = buildSnapshot(NOW, [
   proc(400, 1, NOW - 60_000, `"${CLI_EXE}" --remote-control`),
   proc(500, 1, NOW - 60_000, `"${CLI_EXE}" -p "summarize"`),
   proc(800, 1, NOW - 30_000, `"${CLI_EXE}" --resume ${ID.forkParent} --fork-session`),
-  { pid: 900, ppid: 1, name: 'Claude.exe', root: true, startFt: ft(NOW - 9_000_000), exe: DESKTOP_EXE, cmd: `"${DESKTOP_EXE}"` },
+  { pid: 900, ppid: 1, name: 'Claude.exe', startFt: ft(NOW - 9_000_000), exe: DESKTOP_EXE, cmd: `"${DESKTOP_EXE}"` },
   proc(600, 900, NOW - 600_000, `"${CLI_EXE}" --output-format stream-json --input-format stream-json`),
   proc(700, 900, NOW - 600_000, `"${CLI_EXE}" --output-format stream-json --input-format stream-json --resume ${ID.desktop}`),
-  { pid: 301, ppid: 100, name: 'conhost.exe', root: false, startFt: ft(NOW - 3600_000) },
 ]);
 
 const source = new ClaudeSource(cfg);
@@ -102,8 +99,8 @@ test('a registered session is linked to its process', () => {
   assert.equal(f.rcState, 'on');
   assert.equal(f.rcUrl, 'https://claude.ai/code/session_01AAA');
   assert.equal(f.title, 'Fix login');
-  assert.equal(f.lastMessage?.text, 'Done.');
-  assert.deepEqual(f.children, [], 'console hosts are not counted as children');
+  assert.equal(f.phase, 'idle', "Claude's own status");
+  assert.ok(f.lastActivityAt! >= NOW - 60_000, 'the transcript was written just now');
   assert.deepEqual(f.resume?.command, ['claude', '--remote-control', '--resume', ID.registered]);
 });
 
@@ -121,10 +118,8 @@ test('a live process Claude no longer lists is found from its --resume id', () =
   assert.equal(f.registered, false);
   assert.equal(f.rcState, 'unknown');
   assert.equal(f.rcExpected, true);
-  assert.equal(f.title, 'E2E run');
-  assert.equal(f.rcUrl, 'https://claude.ai/code/session_01CCC');
-  assert.equal(f.pendingTool?.name, 'Bash');
-  assert.equal(f.pendingTool?.summary, 'npm run test:e2e');
+  assert.equal(f.phase, 'unknown', 'no registry, so its busy/idle state is not known');
+  assert.equal(f.title, 'work', 'the folder name');
 });
 
 test('a bare process is matched to the newest transcript in its folder', () => {

@@ -2,10 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config.ts';
 import type { ProcInfo, Snapshot } from '../proc/helper.ts';
-import type { LastMessage, PendingTool, Phase, SessionFacts } from '../types.ts';
-import { baseName, fileTimeToMs, flagValue, normPath, readdirSafe, readJsonFile, splitCommandLine, statSafe, UUID_RE } from '../util.ts';
-import { childProcs, maxDefined, mtimeOf, newest, toolSummary } from './common.ts';
-import { FollowerCache } from './jsonl.ts';
+import type { Phase, SessionFacts } from '../types.ts';
+import { baseName, fileTimeToMs, flagValue, maxDefined, mtimeOf, normPath, readdirSafe, readJsonFile, splitCommandLine, statSafe, UUID_RE } from '../util.ts';
 
 /** One `~/.claude/sessions/<pid>.json` file: Claude's own list of running sessions. */
 export interface RegistryEntry {
@@ -27,29 +25,13 @@ export interface RegistryEntry {
   spare?: unknown;
 }
 
-/** Claude desktop app's record of a Code-tab session. */
+/** Claude app's record of a Code-tab session. */
 export interface DesktopMeta {
   localId: string;
   cliSessionId?: string;
   title?: string;
-  cwd?: string;
   remoteControlUserEnabled?: boolean;
   bridgeSessionIds: string[];
-  isArchived?: boolean;
-  permissionMode?: string;
-  lastActivityAt?: number;
-}
-
-export interface TranscriptState {
-  lastAt?: number;
-  cwd?: string;
-  bridgeUrl?: string;
-  title?: string;
-  phase: Phase;
-  pending: Map<string, PendingTool>;
-  lastAssistant?: LastMessage;
-  lastUser?: LastMessage;
-  permissionMode?: string;
 }
 
 /** How soon to look for new ~/.claude/projects folders when a transcript is missing. */
@@ -69,96 +51,8 @@ export function projectSlug(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
-export function initTranscript(): TranscriptState {
-  return { phase: 'unknown', pending: new Map() };
-}
-
-function isCommandNoise(text: string): boolean {
-  return /^\s*<(command-name|command-message|local-command|bash-input|bash-stdout|system-reminder)/.test(text);
-}
-
-/** Fold one transcript line into the running state. */
-export function reduceTranscript(s: TranscriptState, e: any): void {
-  if (!e || typeof e !== 'object') return;
-  const at = typeof e.timestamp === 'string' ? Date.parse(e.timestamp) : undefined;
-  if (at && !Number.isNaN(at)) s.lastAt = at;
-  if (typeof e.cwd === 'string') s.cwd = e.cwd;
-
-  switch (e.type) {
-    case 'bridge-session':
-      if (e.bridgeSessionId) s.bridgeUrl = bridgeUrl(e.bridgeSessionId);
-      return;
-    case 'custom-title':
-      if (e.customTitle) s.title = e.customTitle;
-      return;
-    case 'permission-mode':
-      s.permissionMode = e.permissionMode;
-      return;
-    case 'system':
-      if (e.subtype === 'bridge_status' && typeof e.url === 'string') s.bridgeUrl = e.url;
-      if (e.subtype === 'stop_hook_summary' || e.subtype === 'turn_duration') {
-        s.phase = 'idle';
-        s.pending.clear();
-      }
-      return;
-    case 'user': {
-      if (e.isSidechain) return;
-      const c = e.message?.content;
-      if (typeof c === 'string') {
-        if (!e.isMeta && !isCommandNoise(c)) {
-          s.lastUser = { role: 'user', text: c, at };
-          s.phase = 'busy';
-        }
-        return;
-      }
-      if (!Array.isArray(c)) return;
-      let toolResult = false;
-      for (const b of c) {
-        if (b?.type === 'tool_result') {
-          s.pending.delete(b.tool_use_id);
-          toolResult = true;
-        } else if (b?.type === 'text' && typeof b.text === 'string' && !e.isMeta) {
-          if (b.text.startsWith('[Request interrupted')) {
-            s.phase = 'idle';
-            s.pending.clear();
-            return;
-          }
-          if (!isCommandNoise(b.text)) {
-            s.lastUser = { role: 'user', text: b.text, at };
-            s.phase = 'busy';
-          }
-        }
-      }
-      if (toolResult) s.phase = 'busy';
-      return;
-    }
-    case 'assistant': {
-      if (e.isSidechain) return;
-      const m = e.message;
-      if (!m || !Array.isArray(m.content)) return;
-      for (const b of m.content) {
-        if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
-          s.lastAssistant = { role: 'assistant', text: b.text, at };
-        } else if (b?.type === 'tool_use' && b.id) {
-          s.pending.set(b.id, { name: String(b.name ?? 'tool'), summary: toolSummary(b.name, b.input), at: at ?? Date.now() });
-        }
-      }
-      if ((m.stop_reason === 'end_turn' || m.stop_reason === 'stop_sequence') && s.pending.size === 0) s.phase = 'idle';
-      else s.phase = 'busy';
-      return;
-    }
-  }
-}
-
-function latestPending(s: TranscriptState | undefined): PendingTool | undefined {
-  let best: PendingTool | undefined;
-  for (const p of s?.pending.values() ?? []) if (!best || p.at >= best.at) best = p;
-  return best;
-}
-
 export class ClaudeSource {
   private readonly cfg: Config;
-  private readonly transcripts = new FollowerCache<TranscriptState>(initTranscript, reduceTranscript);
   private readonly transcriptPaths = new Map<string, string>();
   private projectDirs: string[] = [];
   private projectDirsAt = 0;
@@ -190,17 +84,14 @@ export class ClaudeSource {
     return out;
   }
 
-  collect(snap: Snapshot, now: number, desktopMainPid: number | undefined): SessionFacts[] {
+  collect(snap: Snapshot, now: number, appPid: number | undefined): SessionFacts[] {
     const registry = this.readRegistry();
     this.refreshDesktopMeta(now);
-    this.transcripts.prune();
 
     const regByPid = new Map<number, RegistryEntry[]>();
     for (const r of registry) regByPid.set(r.pid, [...(regByPid.get(r.pid) ?? []), r]);
 
-    const sessionProcs = snap.procs.filter(
-      (p) => p.root && p.name.toLowerCase() === 'claude.exe' && !!p.exe && !/\\WindowsApps\\/i.test(p.exe),
-    );
+    const sessionProcs = snap.procs.filter((p) => p.name.toLowerCase() === 'claude.exe' && !!p.exe && !/\\WindowsApps\\/i.test(p.exe));
 
     const facts: SessionFacts[] = [];
     const linked = new Set<RegistryEntry>();
@@ -210,19 +101,19 @@ export class ClaudeSource {
     // Pass 1: processes we can identify from the registry or their command line.
     for (const proc of sessionProcs) {
       const args = splitCommandLine(proc.cmd ?? '').slice(1);
-      const desktop = proc.ppid === desktopMainPid || args.includes('--input-format');
+      const desktop = proc.ppid === appPid || args.includes('--input-format');
       if (!desktop && !isInteractiveCli(args)) continue;
       const reg = (regByPid.get(proc.pid) ?? []).find((r) => sameProcess(r, proc));
       if (reg) linked.add(reg);
       if (reg?.spare) continue;
-      // The desktop app also runs helper processes; only the ones it registered are sessions.
+      // The Claude app also runs helper processes; only the ones it registered are sessions.
       if (desktop && !reg) continue;
       // With --fork-session the conversation gets a new id, so --resume points at the parent.
       const fromArgs = args.includes('--fork-session') ? undefined : flagValue(args, ['--resume', '-r', '--session-id']);
       const sessionId = reg?.sessionId ?? (fromArgs && UUID_RE.test(fromArgs) ? fromArgs : undefined);
       if (sessionId) {
         claimed.add(sessionId);
-        facts.push(this.liveFacts(snap, now, proc, args, desktop, reg, sessionId));
+        facts.push(this.liveFacts(proc, args, desktop, reg, sessionId));
       } else {
         pendingCwdLookups.push({ proc, args, desktop });
       }
@@ -232,7 +123,7 @@ export class ClaudeSource {
     for (const { proc, args, desktop } of pendingCwdLookups) {
       const sessionId = this.findTranscriptByCwd(proc.cwd, proc.startMs, claimed);
       if (sessionId) claimed.add(sessionId);
-      facts.push(this.liveFacts(snap, now, proc, args, desktop, undefined, sessionId));
+      facts.push(this.liveFacts(proc, args, desktop, undefined, sessionId));
     }
 
     // A conversation that goes on in a newer process makes the records of its older processes history:
@@ -264,7 +155,7 @@ export class ClaudeSource {
       const updated = reg.updatedAt ?? reg.startedAt ?? 0;
       if (now - updated > retention) continue;
       claimed.add(reg.sessionId);
-      facts.push(this.staleFacts(reg, now));
+      facts.push(this.staleFacts(reg));
     }
 
     // Two live processes on one conversation: keep keys unique.
@@ -277,21 +168,10 @@ export class ClaudeSource {
     return facts;
   }
 
-  private liveFacts(
-    snap: Snapshot,
-    now: number,
-    proc: ProcInfo,
-    args: string[],
-    desktop: boolean,
-    reg: RegistryEntry | undefined,
-    sessionId: string | undefined,
-  ): SessionFacts {
+  private liveFacts(proc: ProcInfo, args: string[], desktop: boolean, reg: RegistryEntry | undefined, sessionId: string | undefined): SessionFacts {
     const transcriptPath = sessionId ? this.findTranscript(sessionId) : undefined;
-    const t = transcriptPath ? this.transcripts.get(transcriptPath) : undefined;
-    const ts = t?.state;
     const meta = this.metaFor(sessionId, reg?.hostSessionId);
-    const cwd = reg?.cwd ?? proc.cwd ?? ts?.cwd;
-    const folder = baseName(cwd);
+    const cwd = reg?.cwd ?? proc.cwd;
     const procKey = `${proc.pid}:${proc.startFt}`;
 
     const rcOn = !!reg?.bridgeSessionId;
@@ -301,26 +181,17 @@ export class ClaudeSource {
       ? bridgeUrl(reg.bridgeSessionId)
       : meta?.bridgeSessionIds.length
         ? bridgeUrl(meta.bridgeSessionIds[meta.bridgeSessionIds.length - 1])
-        : ts?.bridgeUrl;
+        : undefined;
 
-    let phase: Phase = ts?.phase ?? 'unknown';
-    if (reg?.status === 'busy') phase = 'busy';
-    else if (reg?.status) phase = 'idle';
-
-    const permissionMode = flagValue(args, ['--permission-mode']) ?? meta?.permissionMode ?? ts?.permissionMode;
-    const title =
-      meta?.title ??
-      (reg?.name && reg.nameSource !== 'derived' ? reg.name : undefined) ??
-      ts?.title ??
-      reg?.name ??
-      (folder ?? 'Claude session');
+    // Claude's own status; a process it no longer lists could be doing anything.
+    const phase: Phase = reg?.status === 'busy' ? 'busy' : reg?.status ? 'idle' : 'unknown';
+    const title = meta?.title ?? (reg?.name && reg.nameSource !== 'derived' ? reg.name : undefined) ?? reg?.name ?? baseName(cwd) ?? 'Claude session';
 
     const exe = proc.exe && fs.existsSync(proc.exe) ? proc.exe : this.cfg.claudeCommand;
     const command = sessionId ? [exe, '--remote-control', '--resume', sessionId] : [exe, '--remote-control'];
 
     return {
       key: sessionId ? `claude:${sessionId}` : `claude-pid:${proc.pid}:${proc.startFt ?? ''}`,
-      tool: 'claude',
       host: desktop ? 'desktop' : 'cli',
       title,
       cwd,
@@ -330,38 +201,25 @@ export class ClaudeSource {
       alive: true,
       phase,
       startedAt: reg?.startedAt ?? proc.startMs,
-      lastActivityAt: maxDefined(
-        t?.mtimeMs,
-        transcriptPath && sessionId ? this.subagentActivity(transcriptPath, sessionId) : undefined,
-        reg?.statusUpdatedAt,
-      ),
+      lastActivityAt: maxDefined(transcriptPath ? mtimeOf(transcriptPath) : undefined, reg?.statusUpdatedAt),
       registered: !!reg,
       staleRecord: false,
       lastKnownBusy: phase === 'busy',
       rcExpected,
       rcState: reg ? (rcOn ? 'on' : 'off') : 'unknown',
       rcUrl,
-      pendingTool: latestPending(ts),
-      approvalsDisabled: args.includes('--dangerously-skip-permissions') || permissionMode === 'bypassPermissions',
-      lastMessage: newest(ts?.lastAssistant, ts?.lastUser),
-      exe: proc.exe,
       resume: cwd ? { cwd, title, command } : undefined,
-      selfCpuMs: proc.cpuMs,
-      children: childProcs(snap, proc.pid),
     };
   }
 
-  private staleFacts(reg: RegistryEntry, now: number): SessionFacts {
+  private staleFacts(reg: RegistryEntry): SessionFacts {
     const sessionId = reg.sessionId!;
     const transcriptPath = this.findTranscript(sessionId);
-    const ts = transcriptPath ? this.transcripts.get(transcriptPath)?.state : undefined;
     const meta = this.metaFor(sessionId, reg.hostSessionId);
-    const cwd = reg.cwd ?? ts?.cwd;
-    const folder = baseName(cwd);
-    const title = meta?.title ?? reg.name ?? ts?.title ?? (folder ?? 'Claude session');
+    const cwd = reg.cwd;
+    const title = meta?.title ?? reg.name ?? baseName(cwd) ?? 'Claude session';
     return {
       key: `claude:${sessionId}`,
-      tool: 'claude',
       host: reg.entrypoint === 'claude-desktop' ? 'desktop' : 'cli',
       title,
       cwd,
@@ -377,11 +235,8 @@ export class ClaudeSource {
       // It was reachable from the phone, so losing it matters even if it was idle.
       rcExpected: !!reg.bridgeSessionId,
       rcState: 'n/a',
-      rcUrl: reg.bridgeSessionId ? bridgeUrl(reg.bridgeSessionId) : ts?.bridgeUrl,
-      approvalsDisabled: false,
-      lastMessage: newest(ts?.lastAssistant, ts?.lastUser),
+      rcUrl: reg.bridgeSessionId ? bridgeUrl(reg.bridgeSessionId) : undefined,
       resume: cwd ? { cwd, title, command: [this.cfg.claudeCommand, '--remote-control', '--resume', sessionId] } : undefined,
-      children: [],
     };
   }
 
@@ -419,12 +274,8 @@ export class ClaudeSource {
                 localId: raw.sessionId ?? f.name.replace(/\.json$/, ''),
                 cliSessionId: raw.cliSessionId,
                 title: raw.title,
-                cwd: raw.cwd,
                 remoteControlUserEnabled: raw.remoteControlUserEnabled,
                 bridgeSessionIds: Array.isArray(raw.bridgeSessionIds) ? raw.bridgeSessionIds : [],
-                isArchived: raw.isArchived,
-                permissionMode: raw.permissionMode,
-                lastActivityAt: raw.lastActivityAt,
               },
             };
             this.desktopMetaFiles.set(file, cached);
@@ -477,17 +328,6 @@ export class ClaudeSource {
     }
     if (best) this.transcriptPaths.set(best.id, path.join(dir, `${best.id}.jsonl`));
     return best?.id;
-  }
-
-  /** Subagents write their own transcripts; count them as activity of the parent session. */
-  private subagentActivity(transcriptPath: string, sessionId: string): number | undefined {
-    const dir = path.join(path.dirname(transcriptPath), sessionId, 'subagents');
-    let best: number | undefined;
-    for (const f of readdirSafe(dir)) {
-      if (!f.isFile()) continue;
-      best = maxDefined(best, mtimeOf(path.join(dir, f.name)));
-    }
-    return best;
   }
 }
 

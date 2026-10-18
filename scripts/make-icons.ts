@@ -1,10 +1,11 @@
-// Draws the app icons (PNG) with no dependencies: `npm run icons`.
+// Draws the app icons (PNG, plus the Windows .ico) with no dependencies: `npm run icons`.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 
-const OUT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'web', 'icons');
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const OUT = path.join(ROOT, 'web', 'icons');
 
 type RGB = [number, number, number];
 const TOP: RGB = [67, 56, 202];
@@ -27,7 +28,7 @@ function segDist(px: number, py: number, ax: number, ay: number, bx: number, by:
 const cover = (d: number) => Math.max(0, Math.min(1, 0.5 - d));
 const mix = (a: RGB, b: RGB, t: number): RGB => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 
-function draw(size: number, opts: { background: boolean; scale?: number }): Buffer {
+function draw(size: number, opts: { background: boolean; scale?: number; rounded?: boolean }): Buffer {
   const px = Buffer.alloc(size * size * 4);
   const s = size * (opts.scale ?? 1);
   const off = (size - s) / 2;
@@ -54,7 +55,7 @@ function draw(size: number, opts: { background: boolean; scale?: number }): Buff
         px[i] = c[0];
         px[i + 1] = c[1];
         px[i + 2] = c[2];
-        px[i + 3] = 255;
+        px[i + 3] = opts.rounded ? Math.round(255 * roundedCover(fx, fy, size)) : 255;
       } else {
         // Monochrome badge: white shapes on transparent.
         const a = Math.max(lineA, dotA, haloA);
@@ -64,6 +65,33 @@ function draw(size: number, opts: { background: boolean; scale?: number }): Buff
     }
   }
   return px;
+}
+
+/** Coverage of a rounded square (Windows icons are not masked by the OS like phone icons). */
+function roundedCover(x: number, y: number, size: number): number {
+  const r = size * 0.22;
+  const dx = Math.max(r - x, 0, x - (size - r));
+  const dy = Math.max(r - y, 0, y - (size - r));
+  return cover(Math.hypot(dx, dy) - r);
+}
+
+/** A Windows .ico made of PNG images (supported since Windows Vista). */
+function ico(images: { size: number; png: Buffer }[]): Buffer {
+  const header = Buffer.alloc(6 + 16 * images.length);
+  header.writeUInt16LE(1, 2);
+  header.writeUInt16LE(images.length, 4);
+  let offset = header.length;
+  images.forEach(({ size, png }, i) => {
+    const e = 6 + 16 * i;
+    header[e] = size >= 256 ? 0 : size;
+    header[e + 1] = size >= 256 ? 0 : size;
+    header.writeUInt16LE(1, e + 4);
+    header.writeUInt16LE(32, e + 6);
+    header.writeUInt32LE(png.length, e + 8);
+    header.writeUInt32LE(offset, e + 12);
+    offset += png.length;
+  });
+  return Buffer.concat([header, ...images.map((i) => i.png)]);
 }
 
 const CRC = new Uint32Array(256).map((_, n) => {
@@ -115,3 +143,9 @@ for (const [name, size, opts] of icons) {
   fs.writeFileSync(path.join(OUT, name), png(size, draw(size, opts)));
   console.log('wrote', name);
 }
+
+// The exe and shortcut icon.
+const sizes = [16, 24, 32, 48, 64, 128, 256];
+fs.mkdirSync(path.join(ROOT, 'assets'), { recursive: true });
+fs.writeFileSync(path.join(ROOT, 'assets', 'app.ico'), ico(sizes.map((size) => ({ size, png: png(size, draw(size, { background: true, rounded: true })) }))));
+console.log('wrote assets/app.ico');

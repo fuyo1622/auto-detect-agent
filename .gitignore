@@ -4,3 +4,5 @@ bin/
 config.json
 .env
 data-dev/
+build/
+dist/

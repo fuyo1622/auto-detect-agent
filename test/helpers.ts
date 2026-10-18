@@ -76,7 +76,6 @@ export function request(
 export function baseFacts(over: Partial<SessionFacts> = {}): SessionFacts {
   return {
     key: 'claude:test',
-    tool: 'claude',
     host: 'cli',
     title: 'Test session',
     alive: true,
@@ -86,8 +85,6 @@ export function baseFacts(over: Partial<SessionFacts> = {}): SessionFacts {
     lastKnownBusy: false,
     rcExpected: true,
     rcState: 'on',
-    approvalsDisabled: false,
-    children: [],
     ...over,
   };
 }
@@ -95,19 +92,17 @@ export function baseFacts(over: Partial<SessionFacts> = {}): SessionFacts {
 export function baseView(over: Partial<SessionView> = {}): SessionView {
   return {
     key: 'claude:test',
-    tool: 'claude',
     host: 'cli',
     title: 'Test session',
     alive: true,
     busy: false,
+    idle: true,
     health: 'waiting',
     detail: 'Waiting for your next message',
-    activity: 'waiting',
-    activityDetail: 'Waiting for your next message',
     healthSince: Date.now(),
     notify: false,
     rc: { expected: true, state: 'on' },
-    actions: ['reconnect', 'stop'],
+    actions: ['reconnect'],
     ...over,
   };
 }

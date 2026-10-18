@@ -2,7 +2,9 @@
 param(
     [string]$AdminUrl = 'http://127.0.0.1:7421',
     [int]$AgentPid = 0,
-    [string]$LogPath = ''
+    [string]$LogPath = '',
+    # The installed AgentMonitor.exe (empty when running from source): enables "Uninstall".
+    [string]$ExePath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -67,6 +69,15 @@ if ($LogPath) {
     $log.add_Click({ if (Test-Path $LogPath) { Start-Process notepad.exe $LogPath } })
 }
 [void]$menu.Items.Add('-')
+if ($ExePath) {
+    $remove = $menu.Items.Add('Uninstall Agent Monitor...')
+    $remove.add_Click({
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            'Remove Agent Monitor from this PC? It stops, and no longer starts when you sign in. Your paired phone and settings are kept.',
+            'Agent Monitor', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+        if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) { Start-Process -FilePath $ExePath -ArgumentList 'uninstall' }
+    })
+}
 $quit = $menu.Items.Add('Quit Agent Monitor')
 $quit.add_Click({
     try { [void](Invoke-Agent '/api/admin/shutdown' 'POST') } catch { }

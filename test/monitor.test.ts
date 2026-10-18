@@ -17,8 +17,6 @@ after(() => fs.rmSync(root, { recursive: true, force: true }));
 const cfg = loadConfig(path.join(root, 'no-config.json'));
 cfg.paths.claudeHome = path.join(root, '.claude');
 cfg.paths.claudeAppData = path.join(root, 'Claude');
-cfg.paths.codexHome = path.join(root, '.codex');
-cfg.codexCommand = path.join(root, 'no-codex-here.exe');
 cfg.pollIntervalMs = 3600_000; // scans are driven by the test
 const sessionsDir = path.join(cfg.paths.claudeHome, 'sessions');
 const work = path.join(root, 'work');
@@ -55,9 +53,7 @@ const proc = (pid: number, startMs: number, cmd: string, extra: object = {}) => 
   pid,
   ppid: 1,
   name: 'claude.exe',
-  root: true,
   startFt: ft(startMs),
-  cpuMs: 1000,
   exe: CLI,
   cwd: work,
   cmd: `"${CLI}" ${cmd}`,
@@ -68,7 +64,7 @@ let procs: any[] = [];
 const helper = { mode: 'ok', snapshot: async (): Promise<Snapshot> => buildSnapshot(Date.now(), procs) };
 const store = new Store(path.join(root, 'state.json'), cfg.defaults);
 const monitor = new Monitor(cfg, store, helper as any, memoryLog());
-monitor.appIds = { claude: 'Claude_abc!Claude', codex: 'OpenAI.Codex_xyz!App' };
+monitor.appId = 'Claude_abc!Claude';
 after(() => monitor.stop());
 
 const transitions: Transition[] = [];
@@ -95,7 +91,8 @@ test('a terminal session with Remote Control on is "waiting"', async () => {
   assert.equal(s.title, 'Fix login');
   assert.equal(s.rc.state, 'on');
   assert.equal(s.rc.url, 'https://claude.ai/code/session_01AAA');
-  assert.deepEqual(s.actions, ['reconnect', 'stop']);
+  assert.deepEqual(s.actions, ['reconnect']);
+  assert.equal(s.idle, true);
   assert.equal(transitions.at(-1)?.to, 'waiting');
   assert.equal(transitions.at(-1)?.from, undefined);
 });
@@ -106,7 +103,6 @@ test('Remote Control dropping turns it into "rc-lost", reported once', async () 
   await scan();
   const s = find(`claude:${S1}`)!;
   assert.equal(s.health, 'rc-lost');
-  assert.equal(s.activity, 'waiting');
   assert.equal(s.notify, true);
   assert.equal(transitions.length, before + 1);
   assert.deepEqual([transitions.at(-1)!.from, transitions.at(-1)!.to], ['waiting', 'rc-lost']);
@@ -162,21 +158,13 @@ test('a session that closes normally (process and record gone) is "ended", then 
   assert.equal(find(`claude:${S1}`), undefined);
 });
 
-test('busy with no transcript writes is "stuck" unless it (or a tool it runs) uses CPU', async () => {
+test('a busy session is "working", however quiet (the official app shows what it is doing)', async () => {
   writeRegistry(200, START, { sessionId: S2, status: 'busy', statusUpdatedAt: NOW - 20 * 60_000, bridgeSessionId: 'cse_01BBB' });
   writeTranscript(S2, [{ type: 'user', timestamp: new Date(NOW - 20 * 60_000).toISOString(), message: { content: 'long job' } }], 20 * 60_000);
-  const shell = { pid: 201, ppid: 200, name: 'pwsh.exe', root: false, startFt: ft(NOW - 19 * 60_000), cpuMs: 500 };
-  procs = [proc(200, START, '--remote-control', { cpuMs: 1000 }), shell];
+  procs = [proc(200, START, '--remote-control')];
   await scan();
-  assert.equal(find(`claude:${S2}`)!.health, 'stuck');
-  assert.match(find(`claude:${S2}`)!.detail, /No progress for 20 min/);
-
-  await new Promise((r) => setTimeout(r, 20));
-  procs = [proc(200, START, '--remote-control', { cpuMs: 1000 }), { ...shell, cpuMs: 5000 }];
-  await scan();
-  assert.equal(find(`claude:${S2}`)!.health, 'working', 'its shell burned CPU, so it is working');
-  await scan();
-  assert.equal(find(`claude:${S2}`)!.health, 'working', 'recent CPU use keeps it working');
+  const s = find(`claude:${S2}`)!;
+  assert.deepEqual([s.health, s.busy, s.idle], ['working', true, false]);
 });
 
 test('a Claude app session whose Remote Control was switched on in the app but is not connected', async () => {
@@ -190,8 +178,8 @@ test('a Claude app session whose Remote Control was switched on in the app but i
   writeRegistry(600, NOW - 600_000, { sessionId: S3, status: 'idle', entrypoint: 'claude-desktop', hostSessionId: 'local_abc', bridgeSessionId: null });
   writeTranscript(S3, [answer]);
   procs = [
-    { pid: 900, ppid: 1, name: 'Claude.exe', root: true, startFt: ft(NOW - 9_000_000), exe: DESKTOP, cmd: `"${DESKTOP}"` },
-    { pid: 901, ppid: 900, name: 'Claude.exe', root: true, startFt: ft(NOW - 9_000_000), exe: DESKTOP, cmd: `"${DESKTOP}" --type=renderer` },
+    { pid: 900, ppid: 1, name: 'Claude.exe', startFt: ft(NOW - 9_000_000), exe: DESKTOP, cmd: `"${DESKTOP}"` },
+    { pid: 901, ppid: 900, name: 'Claude.exe', startFt: ft(NOW - 9_000_000), exe: DESKTOP, cmd: `"${DESKTOP}" --type=renderer` },
     proc(600, NOW - 600_000, '--output-format stream-json --input-format stream-json', { ppid: 900 }),
   ];
   await scan();
@@ -204,8 +192,8 @@ test('a Claude app session whose Remote Control was switched on in the app but i
   const app = monitor.apps.find((a) => a.id === 'claude-desktop')!;
   assert.equal(app.running, true);
   assert.equal(app.pid, 900, 'the main window process, not a renderer');
-  assert.deepEqual(app.actions, ['restart', 'stop']);
-  assert.deepEqual(monitor.apps.find((a) => a.id === 'codex-desktop')!.actions, ['start']);
+  assert.deepEqual(app.actions, ['restart']);
+  assert.equal(monitor.apps.length, 1, 'only the Claude app');
 });
 
 test('worst problems are listed first', async () => {
@@ -213,7 +201,7 @@ test('worst problems are listed first', async () => {
   procs.push(proc(700, NOW - 60_000, '--remote-control'));
   await scan();
   const order = monitor.sessions.map((s) => s.health);
-  const rank = ['dead', 'rc-lost', 'stuck', 'approval', 'working', 'waiting', 'ended'];
+  const rank = ['dead', 'rc-lost', 'working', 'waiting', 'ended'];
   assert.deepEqual([...order].sort((a, b) => rank.indexOf(a) - rank.indexOf(b)), order);
   // S2's process vanished in the previous step while busy (its record is still there): dead, listed first.
   assert.equal(monitor.sessions[0].key, `claude:${S2}`);
@@ -292,13 +280,13 @@ test('a transcript in a brand-new project folder is found within seconds, not a 
   writeRegistry(1200, start, { sessionId: S7, status: 'idle', bridgeSessionId: 'cse_01GGG', cwd: brandNew });
   procs = [proc(1200, start, '--remote-control', { cwd: brandNew })];
   await scan();
-  assert.equal(find(`claude:${S7}`)?.lastMessage, undefined, 'no transcript yet');
+  assert.equal(find(`claude:${S7}`)?.lastActivityAt, undefined, 'no transcript yet');
   const dir = path.join(cfg.paths.claudeHome, 'projects', brandNew.replace(/[^a-zA-Z0-9]/g, '-'));
   fs.mkdirSync(dir);
   fs.writeFileSync(path.join(dir, `${S7}.jsonl`), JSON.stringify(answer) + '\n');
   (monitor as any).claude.projectDirsAt = Date.now() - 6000; // the folder list is 6 s old
   await scan();
-  assert.equal(find(`claude:${S7}`)?.lastMessage?.text, 'Done.');
+  assert.ok(find(`claude:${S7}`)?.lastActivityAt, 'its transcript was found');
 });
 
 const S8 = '88888888-8888-4888-8888-888888888888';
@@ -338,14 +326,12 @@ test('"Stopped" marks and superseded records survive an agent restart', async ()
 });
 
 test('which buttons each kind of session gets', () => {
-  const ids = { claude: 'Claude_x!Claude', codex: 'OpenAI.Codex_y!App' };
-  const base = { key: 'k', title: 't', phase: 'idle' as const, registered: true, staleRecord: false, lastKnownBusy: false, rcExpected: false, rcState: 'n/a' as const, approvalsDisabled: false, children: [], resume: { cwd: work, title: 't', command: ['x'] } };
-  const f = (tool: 'claude' | 'codex', host: 'cli' | 'desktop', alive: boolean, appRunning?: boolean) => actionsFor({ ...base, tool, host, alive, appRunning }, ids);
-  assert.deepEqual(f('claude', 'cli', true), ['reconnect', 'stop']);
-  assert.deepEqual(f('claude', 'cli', false), ['resume', 'dismiss']);
-  assert.deepEqual(f('claude', 'desktop', true), ['restart-app'], 'no Move to terminal: the app would run it too');
-  assert.deepEqual(f('claude', 'desktop', false, true), ['dismiss'], 'the running app reopens it itself');
-  assert.deepEqual(f('claude', 'desktop', false, false), ['start-app', 'dismiss']);
-  assert.deepEqual(f('codex', 'cli', true), ['reconnect', 'stop']);
-  assert.deepEqual(f('codex', 'desktop', true), ['open-terminal', 'restart-app']);
+  const base = { key: 'k', title: 't', phase: 'idle' as const, registered: true, staleRecord: false, lastKnownBusy: false, rcExpected: false, rcState: 'n/a' as const, resume: { cwd: work, title: 't', command: ['x'] } };
+  const f = (host: 'cli' | 'desktop', alive: boolean, appRunning?: boolean, appId: string | undefined = 'Claude_x!Claude') => actionsFor({ ...base, host, alive, appRunning }, appId);
+  assert.deepEqual(f('cli', true), ['reconnect'], 'Reconnect (or Turn on Remote Control)');
+  assert.deepEqual(f('cli', false), ['resume', 'dismiss']);
+  assert.deepEqual(f('desktop', true), ['restart-app'], 'no terminal copy: the app would run it too');
+  assert.deepEqual(f('desktop', false, true), ['dismiss'], 'the running app reopens it itself');
+  assert.deepEqual(f('desktop', false, false), ['start-app', 'dismiss']);
+  assert.deepEqual(f('desktop', true, true, ''), [], 'no Claude app installed: nothing to restart');
 });

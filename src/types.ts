@@ -1,45 +1,22 @@
-export type Tool = 'claude' | 'codex';
 export type Host = 'cli' | 'desktop';
 
 /** What the phone shows for a session, worst first. */
-export type Health = 'dead' | 'rc-lost' | 'stuck' | 'approval' | 'working' | 'waiting' | 'ended';
+export type Health = 'dead' | 'rc-lost' | 'working' | 'waiting' | 'ended';
 
-export const PROBLEM_HEALTHS: ReadonlySet<Health> = new Set<Health>(['dead', 'rc-lost', 'stuck', 'approval']);
+export const PROBLEM_HEALTHS: ReadonlySet<Health> = new Set<Health>(['dead', 'rc-lost']);
 
 export type RcState = 'on' | 'off' | 'unknown' | 'n/a';
 export type Phase = 'busy' | 'idle' | 'unknown';
 
 export type SessionAction =
-  | 'reconnect' // restart the session in Windows Terminal with Remote Control on
-  | 'resume' // the session is gone: open it again in Windows Terminal
-  | 'stop' // kill the session process
-  | 'open-terminal' // open a Codex app thread in the Codex CLI
-  | 'restart-app' // restart the desktop app that hosts the session
-  | 'start-app' // start the desktop app that hosted the session
+  | 'reconnect' // restart a terminal session in Windows Terminal with Remote Control on
+  | 'resume' // the terminal session is gone: open it again with Remote Control on
+  | 'restart-app' // restart the Claude app (the fix for its sessions)
+  | 'start-app' // start the Claude app again
   | 'dismiss'; // hide a closed session from the list
 
-export type AppId = 'claude-desktop' | 'codex-desktop' | 'codex-daemon';
-export type AppAction = 'restart' | 'start' | 'stop';
-
-export interface PendingTool {
-  name: string;
-  summary: string;
-  at: number;
-}
-
-export interface LastMessage {
-  role: 'assistant' | 'user';
-  text: string;
-  at?: number;
-}
-
-export interface ChildProc {
-  pid: number;
-  name: string;
-  startMs?: number;
-  cpuMs?: number;
-  cmd?: string;
-}
+export type AppId = 'claude-desktop';
+export type AppAction = 'restart' | 'start';
 
 /** How to bring a session back in a terminal. */
 export interface ResumeSpec {
@@ -49,10 +26,9 @@ export interface ResumeSpec {
   title: string;
 }
 
-/** Everything the sources know about one session, before health is derived. */
+/** Everything known about one session, before health is derived. */
 export interface SessionFacts {
   key: string;
-  tool: Tool;
   host: Host;
   title: string;
   cwd?: string;
@@ -63,35 +39,23 @@ export interface SessionFacts {
   phase: Phase;
   startedAt?: number;
   lastActivityAt?: number;
-  /** Claude only: whether Claude's own session registry still lists this process. */
-  registered: boolean | null;
+  /** Whether Claude's own session registry still lists this process. */
+  registered: boolean;
   /** A record says the session existed but its process is gone. */
   staleRecord: boolean;
   /** For gone sessions: was it working when it went away? */
   lastKnownBusy: boolean;
-  /** Gone because you stopped it (Stop / Reconnect), so it is not a crash. */
+  /** Gone because it was closed from here (Reconnect, app restart), so it is not a crash. */
   stoppedByUser?: boolean;
   rcExpected: boolean;
   rcState: RcState;
   rcUrl?: string;
-  pendingTool?: PendingTool;
-  /** Codex: an approval request is open. */
-  pendingApproval?: string;
-  approvalsDisabled: boolean;
-  lastMessage?: LastMessage;
-  /** Executable of the session process, used to relaunch with the same build. */
-  exe?: string;
   resume?: ResumeSpec;
   appRunning?: boolean;
-  /** CPU time of the session process itself. */
-  selfCpuMs?: number;
-  /** Processes started by the session (shells, test runners, MCP servers), console hosts excluded. */
-  children: ChildProc[];
 }
 
 export interface SessionView {
   key: string;
-  tool: Tool;
   host: Host;
   title: string;
   folder?: string;
@@ -100,20 +64,16 @@ export interface SessionView {
   sessionId?: string;
   alive: boolean;
   busy: boolean;
+  /** Known to be idle (Claude's own status says so), so it is safe to restart. */
+  idle: boolean;
   health: Health;
   detail: string;
-  /** What the session is doing underneath a Remote Control problem. */
-  activity: Health;
-  activityDetail: string;
   healthSince: number;
   /** Whether the current state is worth a push notification. */
   notify: boolean;
   startedAt?: number;
   lastActivityAt?: number;
   rc: { expected: boolean; state: RcState; url?: string };
-  lastMessage?: LastMessage;
-  pendingTool?: PendingTool;
-  running?: string[];
   actions: SessionAction[];
 }
 
@@ -123,7 +83,6 @@ export interface AppStatus {
   installed: boolean;
   running: boolean;
   pid?: number;
-  detail?: string;
   actions: AppAction[];
 }
 
@@ -157,13 +116,12 @@ export type KeepAwake = 'off' | 'while-working' | 'always';
 
 export interface Settings {
   keepAwake: KeepAwake;
-  stuckMinutes: number;
   autoReconnect: boolean;
 }
 
 export interface NotifyPrefs {
+  /** Remote Control lost, or a session stopped unexpectedly. */
   problems: boolean;
-  approval: boolean;
-  finished: boolean;
+  /** The PC woke up or came back online. */
   system: boolean;
 }

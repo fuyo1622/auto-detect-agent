@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
 import { ROOT } from '../src/config.ts';
-import { descendants, ProcHelper, type Snapshot } from '../src/proc/helper.ts';
+import { ProcHelper, type Snapshot } from '../src/proc/helper.ts';
 import { normPath } from '../src/util.ts';
 import { memoryLog, tempDir } from './helpers.ts';
 
@@ -36,17 +36,15 @@ test('the helper builds with the C# compiler that ships with Windows and answers
   assert.ok(log.lines.some((l) => l.includes('built')));
 });
 
-test('a snapshot has command line, executable, working folder, start time and CPU time', async () => {
+test('a snapshot has command line, executable, working folder and start time', async () => {
   const snap = await helper.snapshot(['node.exe']);
   const me = snap.byPid.get(process.pid)!;
   assert.ok(me, 'this test process is listed');
-  assert.equal(me.root, true);
   assert.equal(normPath(me.exe), normPath(process.execPath));
   assert.equal(normPath(me.cwd), normPath(process.cwd()));
   assert.match(me.cmd ?? '', /proc-helper\.test\.ts|--test/);
   const startedMs = Date.now() - process.uptime() * 1000;
   assert.ok(Math.abs(me.startMs! - startedMs) < 5000, `start time ${me.startMs} vs ${startedMs}`);
-  assert.ok((me.cpuMs ?? 0) > 0);
 });
 
 test('non-ASCII folders and arguments come through intact', async () => {
@@ -56,19 +54,15 @@ test('non-ASCII folders and arguments come through intact', async () => {
   assert.equal(c.ppid, process.pid);
   assert.equal(normPath(c.cwd), normPath(dir));
   assert.ok(c.cmd?.includes('中文 參數'), c.cmd);
-  assert.ok(descendants(snap, process.pid).every((p) => p.pid !== process.pid));
 });
 
-test('descendants of a watched process are included, with the parent link', async () => {
+test('only processes with the asked-for names are listed', async () => {
   const kid = spawn('ping.exe', ['-n', '30', '127.0.0.1'], { stdio: 'ignore', windowsHide: true });
   await new Promise((r) => kid.once('spawn', r));
   try {
     const snap = await helper.snapshot(['node.exe']);
-    const p = snap.byPid.get(kid.pid!)!;
-    assert.ok(p, 'ping.exe started by a node.exe is in the snapshot');
-    assert.equal(p.root, false);
-    assert.equal(p.ppid, process.pid);
-    assert.equal(p.exe, undefined, 'only watched processes get exe and cwd');
+    assert.equal(snap.byPid.has(kid.pid!), false, 'ping.exe is not a node.exe');
+    assert.ok(snap.procs.every((p) => p.name.toLowerCase() === 'node.exe'));
   } finally {
     kid.kill();
   }

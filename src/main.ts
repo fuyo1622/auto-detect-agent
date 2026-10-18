@@ -1,13 +1,14 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Actions } from './actions.ts';
 import { AutoReconnect } from './auto.ts';
 import { KeepAwake } from './awake.ts';
-import { loadConfig, ROOT, type Config } from './config.ts';
-import { detectAppIds } from './launch.ts';
+import { CLI_COMMANDS, runCliCommand } from './cli.ts';
+import { loadConfig, PACKAGED, ROOT, type Config } from './config.ts';
+import { install, isInstalledCopy, messageBox, openUrl, startInstalled, uninstall, unpackAssets, waitForAgent } from './install.ts';
+import { detectClaudeAppId } from './launch.ts';
 import { createLogger, type Logger } from './log.ts';
 import { Monitor } from './monitor.ts';
 import { Notifier } from './notify.ts';
@@ -16,33 +17,100 @@ import { ProcHelper } from './proc/helper.ts';
 import { Servers } from './server.ts';
 import { Store } from './store.ts';
 import { Tailscale } from './tailscale.ts';
+import { sleep } from './util.ts';
+import { VERSION } from './version.ts';
 
 const args = process.argv.slice(2);
+const command = args.find((a) => !a.startsWith('-'));
 const background = args.includes('--background');
 
-if (background && !process.env.AGENT_MONITOR_CHILD) {
-  // Relaunch without a console window and return right away (used by autostart).
-  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...args], {
-    cwd: ROOT,
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-    env: { ...process.env, AGENT_MONITOR_CHILD: '1' },
-  });
-  child.unref();
-  console.log(`Agent Monitor is starting in the background (pid ${child.pid}).`);
-  process.exit(0);
+const USAGE = `Agent Monitor ${VERSION}
+  (no arguments)   install this copy, or open the dashboard of the running one
+  --background     run in the background (what the sign-in shortcut does)
+  --foreground     run in this console (Ctrl+C to stop)
+  status | pair | stop
+  install | uninstall [--purge] [--quiet]`;
+
+async function entry(): Promise<void> {
+  const cfg = loadConfig();
+
+  if (command && CLI_COMMANDS.has(command)) process.exit(await runCliCommand(cfg, command));
+  if (command === 'install' || command === 'uninstall') process.exit(await installCommand(cfg, command));
+  if (command) {
+    console.log(USAGE);
+    process.exit(1);
+  }
+
+  // Double-click or Start menu: set up this copy, or show the running one.
+  if (PACKAGED && !background && !args.includes('--foreground') && !process.env.AGENT_MONITOR_CHILD) process.exit(await openOrInstall(cfg));
+
+  if (background && !process.env.AGENT_MONITOR_CHILD) {
+    // Relaunch without a console window and return right away (used by autostart).
+    const self = PACKAGED ? [] : [fileURLToPath(import.meta.url)];
+    const child = spawn(process.execPath, [...self, ...args], {
+      cwd: ROOT,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: { ...process.env, AGENT_MONITOR_CHILD: '1' },
+    });
+    child.unref();
+    console.log(`Agent Monitor is starting in the background (pid ${child.pid}).`);
+    process.exit(0);
+  }
+
+  await runAgent(cfg);
 }
 
-async function main(): Promise<void> {
-  const cfg = loadConfig();
+async function installCommand(cfg: Config, which: 'install' | 'uninstall'): Promise<number> {
+  const quiet = args.includes('--quiet');
+  try {
+    if (which === 'install') await install(cfg, (s) => console.log(s), !quiet);
+    else {
+      let said = '';
+      await uninstall(cfg, { purge: args.includes('--purge') }, (s) => console.log((said = s)));
+      // From Settings > Apps there is no console to read the result in.
+      if (!quiet) await messageBox(said);
+    }
+    return 0;
+  } catch (e) {
+    console.error((e as Error).message);
+    if (!quiet) await messageBox((e as Error).message);
+    return 1;
+  }
+}
+
+async function openOrInstall(cfg: Config): Promise<number> {
+  const dashboard = `http://127.0.0.1:${cfg.adminPort}`;
+  try {
+    if (!isInstalledCopy()) {
+      console.log(`Setting up Agent Monitor ${VERSION}...`);
+      await install(cfg, (s) => console.log(s));
+      await sleep(4000); // time to read the console before it closes
+      return 0;
+    }
+    if (!(await isRunning(cfg))) {
+      startInstalled();
+      if (!(await waitForAgent(cfg.adminPort, 30000))) throw new Error('Agent Monitor did not start.');
+    }
+    openUrl(dashboard);
+    return 0;
+  } catch (e) {
+    console.error((e as Error).message);
+    await messageBox((e as Error).message);
+    return 1;
+  }
+}
+
+async function runAgent(cfg: Config): Promise<void> {
   const log = createLogger(path.join(cfg.paths.data, 'agent.log'), !background, args.includes('--verbose'));
-  const version: string = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+  const version = VERSION;
 
   if (await isRunning(cfg)) {
     log.info(`Agent Monitor is already running (http://127.0.0.1:${cfg.adminPort}).`);
     process.exit(0);
   }
+  unpackAssets(cfg, (...a) => log.warn(...a));
 
   const store = new Store(path.join(cfg.paths.data, 'state.json'), cfg.defaults);
   const helper = new ProcHelper({ exe: cfg.paths.helperExe, source: cfg.paths.helperSource, log });
@@ -97,11 +165,9 @@ async function main(): Promise<void> {
 
   monitor.on('update', (sessions) => {
     servers.broadcast();
-    notifier.onUpdate(sessions);
-    auto.onUpdate(sessions);
+    notifier.onUpdate(sessions, auto.onUpdate(sessions));
     void awake.update(sessions);
   });
-  monitor.on('transition', (t) => notifier.onTransition(t));
   monitor.on('wake', (sleptMs: number) => {
     log.info(`PC woke up after ${Math.round(sleptMs / 60000)} min`);
     void tailscale.refresh(true);
@@ -110,8 +176,8 @@ async function main(): Promise<void> {
   });
   monitor.once('update', (sessions) => notifier.onStart(sessions));
 
-  monitor.appIds = await detectAppIds();
-  log.info('desktop apps:', monitor.appIds);
+  monitor.appId = await detectClaudeAppId();
+  log.info('Claude app:', monitor.appId ?? 'not installed');
   monitor.start();
   void tailscale.refresh(true).then((s) => log.info('tailscale:', s.installed ? (s.serving ? s.url : s.state) : 'not installed'));
   setInterval(() => void tailscale.refresh(), 60000).unref();
@@ -128,15 +194,16 @@ async function main(): Promise<void> {
 }
 
 function startTray(cfg: Config, log: Logger): ChildProcess | undefined {
-  const script = path.join(ROOT, 'scripts', 'tray.ps1');
   try {
     const child = spawn(
       'powershell.exe',
       [
-        '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', script,
+        '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', cfg.paths.trayScript,
         '-AdminUrl', `http://127.0.0.1:${cfg.adminPort}`,
         '-AgentPid', String(process.pid),
         '-LogPath', path.join(cfg.paths.data, 'agent.log'),
+        // The installed exe can remove itself; from source there is nothing to uninstall.
+        ...(PACKAGED ? ['-ExePath', process.execPath] : []),
       ],
       { windowsHide: true, stdio: 'ignore' },
     );
@@ -163,4 +230,4 @@ function isRunning(cfg: Config): Promise<boolean> {
   });
 }
 
-void main();
+void entry();

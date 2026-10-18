@@ -147,15 +147,13 @@ test('PC port: pairing is only done from the phone', async () => {
 test('PC port: settings are validated and saved', async () => {
   const bad = await request(ADMIN, 'PATCH', '/api/settings', { headers: H, body: { keepAwake: 'forever' } });
   assert.equal(bad.status, 400);
-  const low = await request(ADMIN, 'PATCH', '/api/settings', { headers: H, body: { stuckMinutes: 2 } });
-  assert.equal(low.status, 400);
-  const notNumber = await request(ADMIN, 'PATCH', '/api/settings', { headers: H, body: { stuckMinutes: 'abc' } });
-  assert.equal(notNumber.status, 400);
-  const ok = await request(ADMIN, 'PATCH', '/api/settings', { headers: H, body: { keepAwake: 'while-working', stuckMinutes: 30.4, autoReconnect: 1 } });
+  const ok = await request(ADMIN, 'PATCH', '/api/settings', { headers: H, body: { keepAwake: 'while-working', autoReconnect: 1, stuckMinutes: 30 } });
   assert.equal(ok.status, 200);
-  assert.deepEqual(ok.json, { keepAwake: 'while-working', stuckMinutes: 30, autoReconnect: true });
+  assert.deepEqual(ok.json, { keepAwake: 'while-working', autoReconnect: true }, 'unknown settings are ignored');
   const saved = new Store(path.join(dir, 'state.json'), cfg.defaults);
-  assert.equal(saved.data.settings.stuckMinutes, 30, 'written to disk');
+  assert.equal(saved.data.settings.autoReconnect, true, 'written to disk');
+  const off = await request(ADMIN, 'PATCH', '/api/settings', { headers: H, body: { autoReconnect: false } });
+  assert.equal(off.json.autoReconnect, false, 'auto-reconnect can be switched off again');
 });
 
 test('PC port: shutdown is a POST with the client header', async () => {
@@ -208,14 +206,14 @@ test('phone port: a paired phone sees the state and can run actions as itself', 
   assert.deepEqual(calls[0].args, ['claude:abc', 'reconnect']);
   assert.equal(calls[0].req.by, 'Work iPhone');
   assert.equal(calls[0].req.force, true);
-  const app = await request(PHONE, 'POST', '/api/apps/codex-daemon/restart', { headers: auth, body: {} });
+  const app = await request(PHONE, 'POST', '/api/apps/claude-desktop/restart', { headers: auth, body: {} });
   assert.equal(app.status, 200);
-  assert.deepEqual(calls[1].args, ['codex-daemon', 'restart']);
+  assert.deepEqual(calls[1].args, ['claude-desktop', 'restart']);
 
-  const unknownAction = await request(PHONE, 'POST', '/api/sessions/claude:abc/format-disk', { headers: auth, body: {} });
-  assert.equal(unknownAction.status, 400);
-  const unknownApp = await request(PHONE, 'POST', '/api/apps/explorer/restart', { headers: auth, body: {} });
-  assert.equal(unknownApp.status, 400);
+  for (const p of ['/api/sessions/claude:abc/format-disk', '/api/sessions/claude:abc/stop', '/api/apps/explorer/restart', '/api/apps/codex-daemon/start', '/api/apps/claude-desktop/stop']) {
+    const r = await request(PHONE, 'POST', p, { headers: auth, body: {} });
+    assert.equal(r.status, 400, p);
+  }
   assert.equal(calls.length, 2, 'nothing else reached the actions');
 });
 
@@ -246,10 +244,10 @@ test('phone port: push subscription, preferences, test push and unsubscribe', as
   const ok = await request(PHONE, 'POST', '/api/push/subscribe', { headers: auth, body: { subscription: sub } });
   assert.equal(ok.status, 200);
   assert.equal(ok.json.push, true);
-  assert.deepEqual(ok.json.prefs, { problems: true, approval: true, finished: false, system: true });
+  assert.deepEqual(ok.json.prefs, { problems: true, system: true });
 
-  const prefs = await request(PHONE, 'PATCH', '/api/push/prefs', { headers: auth, body: { prefs: { finished: true, problems: 'yes', bogus: true } } });
-  assert.equal(prefs.json.prefs.finished, true);
+  const prefs = await request(PHONE, 'PATCH', '/api/push/prefs', { headers: auth, body: { prefs: { system: false, problems: 'yes', bogus: true } } });
+  assert.equal(prefs.json.prefs.system, false);
   assert.equal(prefs.json.prefs.problems, true, 'non-boolean values are ignored');
   assert.equal('bogus' in prefs.json.prefs, false);
 
@@ -352,12 +350,14 @@ test('event stream: sends the state at once and again on every broadcast', async
   });
   const states = () => events.filter((e) => e.includes('event: state'));
   for (let i = 0; i < 50 && states().length < 1; i++) await new Promise((r) => setTimeout(r, 20));
-  assert.equal(states().length, 1);
+  // At least one: a broadcast still pending from an earlier test may arrive right after the first state.
+  assert.ok(states().length >= 1, 'the state is sent at once');
   const first = JSON.parse(states()[0].split('\n').find((l) => l.startsWith('data:'))!.slice(5));
   assert.equal(first.sessions[0].title, 'Fix login');
 
+  const before = states().length;
   servers.broadcast();
-  for (let i = 0; i < 100 && states().length < 2; i++) await new Promise((r) => setTimeout(r, 20));
-  assert.equal(states().length, 2, 'a broadcast reaches open streams');
+  for (let i = 0; i < 100 && states().length <= before; i++) await new Promise((r) => setTimeout(r, 20));
+  assert.ok(states().length > before, 'a broadcast reaches open streams');
   res.destroy();
 });

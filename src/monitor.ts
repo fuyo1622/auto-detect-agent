@@ -6,7 +6,6 @@ import { deriveHealth, healthRank } from './health.ts';
 import type { Logger } from './log.ts';
 import type { ProcHelper, ProcInfo, Snapshot } from './proc/helper.ts';
 import { ClaudeSource } from './sources/claude.ts';
-import { CodexSource, daemonProcesses, findCodexDesktop } from './sources/codex.ts';
 import type { Store } from './store.ts';
 import type { AppStatus, Health, SessionAction, SessionFacts, SessionView } from './types.ts';
 import { baseName } from './util.ts';
@@ -26,27 +25,14 @@ interface Tracked {
   expiresAt?: number;
 }
 
-interface CpuSample {
-  pid: number;
-  self: number;
-  kids: number;
-  at: number;
-  activeAt?: number;
-}
-
-/** Rates of CPU use that count as "doing something", as a fraction of one core. */
-const SELF_ACTIVE_RATE = 0.25;
-const CHILD_ACTIVE_RATE = 0.03;
-
 export class Monitor extends EventEmitter {
   sessions: SessionView[] = [];
   apps: AppStatus[] = [];
   lastWakeAt?: number;
-  appIds: { claude?: string; codex?: string } = {};
+  /** AppUserModelID of the Claude app, when it is installed. */
+  appId: string | undefined;
   private tracked = new Map<string, Tracked>();
-  private cpu = new Map<string, CpuSample>();
   private claude: ClaudeSource;
-  private codex: CodexSource;
   private timer: NodeJS.Timeout | undefined;
   private running = false;
   private again = false;
@@ -54,7 +40,7 @@ export class Monitor extends EventEmitter {
   private lastTickAt = 0;
   private watchers: fs.FSWatcher[] = [];
   private debounce: NodeJS.Timeout | undefined;
-  private desktop: { claude?: ProcInfo; codex?: ProcInfo } = {};
+  private app: ProcInfo | undefined;
   private readonly cfg: Config;
   private readonly store: Store;
   private readonly helper: ProcHelper;
@@ -67,7 +53,6 @@ export class Monitor extends EventEmitter {
     this.helper = helper;
     this.log = log;
     this.claude = new ClaudeSource(cfg, store.data.superseded, () => store.save());
-    this.codex = new CodexSource(cfg);
   }
 
   start(): void {
@@ -90,20 +75,15 @@ export class Monitor extends EventEmitter {
     return this.tracked.get(key)?.view;
   }
 
-  desktopProcess(app: 'claude' | 'codex'): ProcInfo | undefined {
-    return this.desktop[app];
+  /** The Claude app's main process, when it is running. */
+  appProcess(): ProcInfo | undefined {
+    return this.app;
   }
 
   /** Remember that the session's process is being closed on purpose (kept until it runs again). */
   markStopped(key: string): void {
     this.store.data.stopped[key] = Date.now();
     this.store.save();
-  }
-
-  /** Ask the Codex daemon for its status again on the next scan. */
-  recheckDaemon(): void {
-    this.codex.daemon.checkedAt = 0;
-    this.refreshSoon(3000);
   }
 
   /** Re-scan soon (after an action, or when a session file changes). */
@@ -146,21 +126,20 @@ export class Monitor extends EventEmitter {
     this.lastTickAt = now;
 
     const snap = await this.helper.snapshot();
-    this.desktop.claude = findClaudeDesktop(snap);
-    this.desktop.codex = findCodexDesktop(snap);
-    this.codex.refreshDaemon(now);
-
-    const facts = [
-      ...this.claude.collect(snap, now, this.desktop.claude?.pid),
-      ...this.codex.collect(snap, now, this.desktop.codex),
+    this.app = findClaudeApp(snap);
+    const facts = this.claude.collect(snap, now, this.app?.pid);
+    for (const f of facts) if (f.host === 'desktop') f.appRunning = !!this.app;
+    this.apps = [
+      {
+        id: 'claude-desktop',
+        name: 'Claude app',
+        installed: !!this.appId,
+        running: !!this.app,
+        pid: this.app?.pid,
+        actions: this.app ? ['restart'] : this.appId ? ['start'] : [],
+      },
     ];
-    for (const f of facts) {
-      if (f.host === 'desktop' && f.appRunning === undefined) f.appRunning = !!(f.tool === 'claude' ? this.desktop.claude : this.desktop.codex);
-    }
-    this.apps = this.appStatuses(snap);
 
-    const settings = this.store.data.settings;
-    const ctxBase = { now, stuckMs: settings.stuckMinutes * 60000, approvalMs: this.cfg.approvalSeconds * 1000 };
     const next = new Map<string, Tracked>();
     const transitions: Transition[] = [];
     const liveProcs = new Set<string>();
@@ -185,11 +164,9 @@ export class Monitor extends EventEmitter {
       } else if (stoppedAt !== undefined) {
         f.stoppedByUser = true;
       }
-      const cpuActiveAt = this.trackCpu(f, now);
-      const h = deriveHealth(f, { ...ctxBase, cpuActiveAt });
+      const h = deriveHealth(f, now);
       const view: SessionView = {
         key: f.key,
-        tool: f.tool,
         host: f.host,
         title: f.title,
         folder: baseName(f.cwd),
@@ -198,19 +175,15 @@ export class Monitor extends EventEmitter {
         sessionId: f.sessionId,
         alive: f.alive,
         busy: f.alive && f.phase === 'busy',
+        idle: f.alive && f.phase === 'idle',
         health: h.health,
         detail: h.detail,
-        activity: h.activity,
-        activityDetail: h.activityDetail,
         healthSince: prev && prev.view.health === h.health ? prev.view.healthSince : now,
         notify: h.notify,
         startedAt: f.startedAt,
         lastActivityAt: f.lastActivityAt,
         rc: { expected: f.rcExpected, state: f.rcState, url: f.rcUrl },
-        lastMessage: f.lastMessage,
-        pendingTool: f.pendingTool,
-        running: runningSummary(f),
-        actions: actionsFor(f, this.appIds),
+        actions: actionsFor(f, this.appId),
       };
       next.set(f.key, { view, facts: f });
       if (!prev || prev.view.health !== view.health) transitions.push({ key: f.key, from: prev?.view.health, to: view.health, view, previous: prev?.view });
@@ -226,19 +199,17 @@ export class Monitor extends EventEmitter {
       }
       // Same process, new key (Claude registered it, or its transcript appeared): not a closed session.
       if (t.facts.alive && t.facts.pid !== undefined && liveProcs.has(`${t.facts.pid}:${t.facts.procStartMs}`)) continue;
-      const facts: SessionFacts = { ...t.facts, alive: false, staleRecord: false, phase: 'unknown', children: [] };
+      const facts: SessionFacts = { ...t.facts, alive: false, staleRecord: false, phase: 'unknown' };
       const view: SessionView = {
         ...t.view,
         alive: false,
         busy: false,
+        idle: false,
         health: 'ended',
         detail: 'Closed',
-        activity: 'ended',
-        activityDetail: 'Closed',
         healthSince: now,
         notify: false,
-        running: [],
-        actions: actionsFor(facts, this.appIds),
+        actions: actionsFor(facts, this.appId),
       };
       next.set(key, { view, facts, expiresAt: keepUntil });
       transitions.push({ key, from: t.view.health, to: 'ended', view, previous: t.view });
@@ -262,61 +233,10 @@ export class Monitor extends EventEmitter {
       }
     }
 
-    for (const key of this.cpu.keys()) if (!next.has(key)) this.cpu.delete(key);
     this.tracked = next;
     this.sessions = [...next.values()].map((t) => t.view).sort(compareViews);
     for (const t of transitions) this.emit('transition', t);
     this.emit('update', this.sessions);
-  }
-
-  /** Remembers CPU totals between scans; returns when the session last did real work. */
-  private trackCpu(f: SessionFacts, now: number): number | undefined {
-    if (!f.alive || f.pid === undefined) return undefined;
-    const self = f.selfCpuMs ?? 0;
-    const kids = f.children.reduce((sum, c) => sum + (c.cpuMs ?? 0), 0);
-    const prev = this.cpu.get(f.key);
-    const sample: CpuSample = { pid: f.pid, self, kids, at: now, activeAt: prev?.pid === f.pid ? prev.activeAt : undefined };
-    if (prev && prev.pid === f.pid && now > prev.at) {
-      const span = now - prev.at;
-      const selfRate = Math.max(0, self - prev.self) / span;
-      const kidRate = Math.max(0, kids - prev.kids) / span;
-      if (selfRate >= SELF_ACTIVE_RATE || kidRate >= CHILD_ACTIVE_RATE) sample.activeAt = now;
-    }
-    this.cpu.set(f.key, sample);
-    return sample.activeAt;
-  }
-
-  private appStatuses(snap: Snapshot): AppStatus[] {
-    const daemon = this.codex.daemon;
-    const daemonProcs = daemonProcesses(snap, this.desktop.codex);
-    const daemonRunning = daemon.running || (daemon.checkedAt === 0 && daemonProcs.length > 0);
-    return [
-      {
-        id: 'claude-desktop',
-        name: 'Claude app',
-        installed: !!this.appIds.claude,
-        running: !!this.desktop.claude,
-        pid: this.desktop.claude?.pid,
-        actions: this.desktop.claude ? ['restart', 'stop'] : this.appIds.claude ? ['start'] : [],
-      },
-      {
-        id: 'codex-desktop',
-        name: 'Codex app',
-        installed: !!this.appIds.codex,
-        running: !!this.desktop.codex,
-        pid: this.desktop.codex?.pid,
-        actions: this.desktop.codex ? ['restart', 'stop'] : this.appIds.codex ? ['start'] : [],
-      },
-      {
-        id: 'codex-daemon',
-        name: 'Codex remote control',
-        installed: true,
-        running: daemonRunning,
-        pid: daemonProcs[0]?.pid,
-        detail: daemon.detail,
-        actions: daemonRunning ? ['restart', 'stop'] : ['start'],
-      },
-    ];
   }
 
   private watch(dir: string): void {
@@ -328,45 +248,24 @@ export class Monitor extends EventEmitter {
   }
 }
 
-export function findClaudeDesktop(snap: Snapshot): ProcInfo | undefined {
-  return snap.procs.find(
-    (p) => p.root && p.name.toLowerCase() === 'claude.exe' && /\\WindowsApps\\Claude_/i.test(p.exe ?? '') && !/--type=/.test(p.cmd ?? ''),
-  );
+/** The Claude app's main window process (its other processes run with --type=...). */
+export function findClaudeApp(snap: Snapshot): ProcInfo | undefined {
+  return snap.procs.find((p) => p.name.toLowerCase() === 'claude.exe' && /\\WindowsApps\\Claude_/i.test(p.exe ?? '') && !/--type=/.test(p.cmd ?? ''));
 }
 
-export function actionsFor(f: SessionFacts, appIds: { claude?: string; codex?: string }): SessionAction[] {
+export function actionsFor(f: SessionFacts, appId: string | undefined): SessionAction[] {
   const out: SessionAction[] = [];
-  const appId = f.tool === 'claude' ? appIds.claude : appIds.codex;
   // The Claude app reopens a session's process by itself when it closes, and its scratch folders exist only
   // inside the app's own view of the disk. A terminal copy would run the conversation twice, so app sessions
   // are fixed by restarting the app instead.
-  const claudeApp = f.tool === 'claude' && f.host === 'desktop';
-  if (f.alive) {
-    if (f.host === 'cli') {
-      if (f.resume) out.push('reconnect');
-    } else if (!claudeApp && f.resume) {
-      out.push('open-terminal');
-    }
-    if (f.host === 'desktop') {
-      if (appId) out.push('restart-app');
-    } else {
-      out.push('stop');
-    }
-  } else {
-    if (f.resume && !claudeApp) out.push('resume');
-    if (f.host === 'desktop' && appId && f.appRunning === false) out.push('start-app');
-    out.push('dismiss');
+  if (f.host === 'cli') {
+    if (f.resume) out.push(f.alive ? 'reconnect' : 'resume');
+  } else if (appId) {
+    if (f.alive) out.push('restart-app');
+    else if (f.appRunning === false) out.push('start-app');
   }
+  if (!f.alive) out.push('dismiss');
   return out;
-}
-
-function runningSummary(f: SessionFacts): string[] {
-  if (!f.pendingTool) return [];
-  const since = f.pendingTool.at - 3000;
-  return f.children
-    .filter((c) => (c.startMs ?? 0) >= since)
-    .slice(0, 4)
-    .map((c) => c.name);
 }
 
 function compareViews(a: SessionView, b: SessionView): number {

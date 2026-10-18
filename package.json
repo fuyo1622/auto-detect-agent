@@ -1,8 +1,8 @@
 {
   "name": "auto-detect-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Watch Claude Code and Codex sessions on this PC and reconnect them from an iPhone.",
+  "description": "Keeps Claude Code Remote Control reachable from your iPhone: finds sessions on this PC, reconnects them, and alerts you.",
   "type": "module",
   "engines": {
     "node": ">=22.18"
@@ -10,17 +10,17 @@
   "scripts": {
     "start": "node src/main.ts",
     "start:bg": "node src/main.ts --background",
+    "stop": "node src/main.ts stop",
+    "pair": "node src/main.ts pair",
+    "status": "node src/main.ts status",
     "dev": "node --env-file=scripts/dev.env src/main.ts",
-    "dev:status": "node --env-file=scripts/dev.env src/cli.ts status",
-    "stop": "node src/cli.ts stop",
-    "pair": "node src/cli.ts pair",
-    "status": "node src/cli.ts status",
+    "dev:status": "node --env-file=scripts/dev.env src/main.ts status",
+    "build": "node scripts/build.ts",
     "check": "tsc --noEmit",
     "test": "node --test \"test/*.test.ts\"",
-    "icons": "node scripts/make-icons.ts",
-    "autostart:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-autostart.ps1",
-    "autostart:remove": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/uninstall-autostart.ps1",
-    "tailscale:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-tailscale.ps1"
+    "e2e": "node test/e2e/e2e.mjs",
+    "e2e:exe": "node test/e2e/e2e.mjs --exe",
+    "icons": "node scripts/make-icons.ts"
   },
   "dependencies": {
     "qrcode": "^1.5.4",
@@ -30,6 +30,9 @@
     "@types/node": "^24.19.0",
     "@types/qrcode": "^1.5.6",
     "@types/web-push": "^3.6.4",
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6",
+    "resedit": "^3.1.0",
     "typescript": "^7.0.2"
   }
 }

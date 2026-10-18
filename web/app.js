@@ -65,14 +65,12 @@ const ICON = {
 const HEALTH = {
   dead: 'Stopped unexpectedly',
   'rc-lost': 'Remote Control lost',
-  stuck: 'Looks stuck',
-  approval: 'Needs you',
   working: 'Working',
   waiting: 'Waiting for you',
   ended: 'Closed',
 };
-const PROBLEMS = new Set(['dead', 'rc-lost', 'stuck', 'approval']);
-const BANNER_TEXT = { 'rc-lost': 'lost Remote Control', dead: 'stopped unexpectedly', stuck: 'look stuck', approval: 'need you' };
+const PROBLEMS = new Set(['dead', 'rc-lost']);
+const BANNER_TEXT = { 'rc-lost': 'lost Remote Control', dead: 'stopped unexpectedly' };
 
 // ---------------------------------------------------------------- utilities
 
@@ -97,12 +95,8 @@ function clock(t) {
   return today ? time : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`;
 }
 
-function toolLabel(v) {
-  return `${v.tool === 'claude' ? 'Claude' : 'Codex'} · ${v.host === 'cli' ? 'Terminal' : 'App'}`;
-}
-
-function appName(v) {
-  return v.tool === 'claude' ? 'Claude app' : 'Codex app';
+function whereLabel(v) {
+  return v.host === 'cli' ? 'Terminal' : 'Claude app';
 }
 
 async function api(path, { method = 'GET', body } = {}) {
@@ -140,35 +134,27 @@ function b64ToBytes(b64) {
 // ---------------------------------------------------------------- actions
 
 function actionInfo(v, action) {
-  const app = appName(v);
-  const rc = v.tool === 'claude' ? ' with Remote Control on' : '';
   switch (action) {
-    case 'reconnect':
+    case 'reconnect': {
+      // Without Remote Control the same restart is how you turn it on.
+      const turnOn = !v.rc.expected && v.rc.state !== 'on';
       return {
-        label: v.tool === 'claude' ? 'Reconnect' : 'Restart',
-        desc: `Close this process and reopen the same conversation in a new Windows Terminal tab${rc}.`,
-        confirm: `The process running “${v.title}” is closed and the conversation reopens in a new Windows Terminal tab${rc}. The conversation is kept.`,
+        label: turnOn ? 'Turn on Remote Control' : 'Reconnect',
+        desc: 'Close this process and reopen the same conversation in a new Windows Terminal tab with Remote Control on.',
+        confirm: `The process running “${v.title}” is closed and the conversation reopens in a new Windows Terminal tab with Remote Control on. The conversation is kept.`,
       };
+    }
     case 'resume':
-      return { label: 'Resume', desc: `Open the conversation again in a new Windows Terminal tab${rc}.` };
-    case 'open-terminal':
-      return { label: 'Open in terminal', desc: 'Continue this Codex app thread in a Windows Terminal tab (codex resume).' };
-    case 'stop':
-      return {
-        label: 'Stop',
-        desc: 'End the process. The conversation is kept and can be resumed later.',
-        confirm: `Stop “${v.title}”? The conversation is kept and you can resume it later.`,
-        danger: true,
-      };
+      return { label: 'Resume', desc: 'Open the conversation again in a new Windows Terminal tab with Remote Control on.' };
     case 'restart-app':
       return {
-        label: `Restart ${app}`,
-        desc: `Close and reopen the ${app}. Every session inside it restarts.`,
-        confirm: `Restart the ${app}? Every session inside it restarts.`,
+        label: 'Restart Claude app',
+        desc: 'Close and reopen the Claude app. Every session inside it restarts.',
+        confirm: 'Restart the Claude app? Every session inside it restarts.',
         danger: true,
       };
     case 'start-app':
-      return { label: `Open ${app}`, desc: `Start the ${app} on the PC.` };
+      return { label: 'Open Claude app', desc: 'Start the Claude app on the PC.' };
     case 'dismiss':
       return { label: 'Dismiss', desc: 'Hide this closed session from the list.' };
     default:
@@ -179,29 +165,15 @@ function actionInfo(v, action) {
 const APP_ACTIONS = {
   restart: (a) => ({
     label: `Restart ${a.name}`,
-    desc:
-      a.id === 'codex-daemon'
-        ? 'Restart the Codex app-server daemon (keeps its remote-control setting).'
-        : `Close and reopen the ${a.name}. Every session inside it restarts.`,
-    confirm: a.id === 'codex-daemon' ? undefined : `Restart the ${a.name}? Every session inside it restarts.`,
-    danger: a.id !== 'codex-daemon',
-  }),
-  start: (a) => ({
-    label: a.id === 'codex-daemon' ? 'Start Codex remote control' : `Open ${a.name}`,
-    desc: a.id === 'codex-daemon' ? 'Runs “codex remote-control start” on the PC.' : `Start the ${a.name} on the PC.`,
-  }),
-  stop: (a) => ({
-    label: a.id === 'codex-daemon' ? 'Stop the Codex daemon' : `Close ${a.name}`,
-    desc: a.id === 'codex-daemon' ? 'Stops the Codex app-server daemon.' : `Quit the ${a.name}. Its sessions stop.`,
-    confirm: `${a.id === 'codex-daemon' ? 'Stop the Codex daemon' : `Close the ${a.name}`}?`,
+    desc: `Close and reopen the ${a.name}. Every session inside it restarts.`,
+    confirm: `Restart the ${a.name}? Every session inside it restarts.`,
     danger: true,
   }),
+  start: (a) => ({ label: `Open ${a.name}`, desc: `Start the ${a.name} on the PC.` }),
 };
 
 function primaryAction(v) {
-  if (v.health === 'rc-lost' || v.health === 'stuck') {
-    return ['reconnect', 'restart-app', 'open-terminal'].find((a) => v.actions.includes(a));
-  }
+  if (v.health === 'rc-lost') return ['reconnect', 'restart-app'].find((a) => v.actions.includes(a));
   if (v.health === 'dead' || v.health === 'ended') return ['resume', 'start-app'].find((a) => v.actions.includes(a));
   return undefined;
 }
@@ -466,21 +438,9 @@ function sessionsHtml() {
   }
   const all = st.sessions;
   const problems = all.filter((s) => PROBLEMS.has(s.health));
-  const counts = {
-    all: all.length,
-    attention: problems.length,
-    running: all.filter((s) => s.alive).length,
-    claude: all.filter((s) => s.tool === 'claude').length,
-    codex: all.filter((s) => s.tool === 'codex').length,
-  };
+  const counts = { all: all.length, attention: problems.length };
   if (S.filter === 'attention' && !counts.attention) S.filter = 'all';
-  const filters = {
-    all: () => true,
-    attention: (s) => PROBLEMS.has(s.health),
-    running: (s) => s.alive,
-    claude: (s) => s.tool === 'claude',
-    codex: (s) => s.tool === 'codex',
-  };
+  const filters = { all: () => true, attention: (s) => PROBLEMS.has(s.health) };
   const shown = all.filter(filters[S.filter] || filters.all);
   const chip = (id, label) =>
     counts[id] || id === 'all'
@@ -489,13 +449,12 @@ function sessionsHtml() {
 
   let banner = '';
   if (problems.length) {
-    const severe = problems.some((s) => s.health === 'dead' || s.health === 'rc-lost');
-    const byKind = ['rc-lost', 'dead', 'stuck', 'approval']
+    const byKind = ['rc-lost', 'dead']
       .map((h) => [h, problems.filter((s) => s.health === h).length])
       .filter(([, n]) => n)
       .map(([h, n]) => `${n} ${BANNER_TEXT[h]}`)
       .join(' · ');
-    banner = `<div class="banner ${severe ? 'bad' : 'warn'}"><div><b>${problems.length} session${problems.length > 1 ? 's need' : ' needs'} attention</b>
+    banner = `<div class="banner bad"><div><b>${problems.length} session${problems.length > 1 ? 's need' : ' needs'} attention</b>
       <span class="muted">${esc(byKind)}</span></div></div>`;
   }
   if (st.agent.helper === 'fallback') {
@@ -504,10 +463,10 @@ function sessionsHtml() {
 
   const list = shown.length
     ? `<div class="list">${shown.map(cardHtml).join('')}</div>`
-    : `<div class="empty"><b>No sessions</b>${S.filter === 'all' ? 'Start Claude Code or Codex on the PC and it shows up here.' : 'Nothing matches this filter.'}</div>`;
+    : `<div class="empty"><b>No sessions</b>${S.filter === 'all' ? 'Start Claude Code on the PC and it shows up here.' : 'Nothing matches this filter.'}</div>`;
 
   return `${offlineBanner()}${banner}
-    <div class="chips">${chip('all', 'All')}${chip('attention', 'Needs attention')}${chip('running', 'Running')}${chip('claude', 'Claude')}${chip('codex', 'Codex')}</div>
+    ${counts.attention ? `<div class="chips">${chip('all', 'All')}${chip('attention', 'Needs attention')}</div>` : ''}
     ${list}
     ${appsHtml(st.apps, st.agent.host)}
     ${activityHtml(st.activity)}`;
@@ -516,23 +475,22 @@ function sessionsHtml() {
 function offlineBanner() {
   if (S.conn !== 'offline') return '';
   const since = S.lastOk ? ` Last update ${ago(S.lastOk, Date.now())}.` : '';
-  return `<div class="banner bad"><div><b>Can’t reach your PC</b><span class="muted">${since} The PC may be asleep or off, or Tailscale is off on this phone. Retrying…</span></div></div>`;
+  return `<div class="banner bad"><div><b>Can’t reach your PC</b><span class="muted">${since} The PC may be asleep or off, or Tailscale is off on the PC or on this phone. Retrying…</span></div></div>`;
 }
 
-/** Remote Control badge for healthy Claude sessions (a lost connection already shows as the status). */
+/** Remote Control badge for running sessions (a lost connection already shows as the status). */
 function rcChip(v) {
-  if (v.tool !== 'claude' || !v.alive || v.health === 'rc-lost') return '';
-  return v.rc.state === 'on' ? '<span class="rc-chip rc-on">Remote on</span>' : '';
+  if (!v.alive || v.health === 'rc-lost') return '';
+  if (v.rc.state === 'on') return '<span class="rc-chip rc-on">Remote on</span>';
+  return v.rc.expected ? '' : '<span class="rc-chip">No Remote Control</span>';
 }
 
 function cardHtml(v) {
   const primary = primaryAction(v);
   const busy = S.busy.has(v.key);
   const link = v.alive && v.rc?.url && v.rc.state !== 'off' ? v.rc.url : '';
-  const showDetail = !['waiting', 'ended'].includes(v.health);
-  const sub = v.health === 'rc-lost' && v.activityDetail ? `<small>${esc(v.activityDetail)}</small>` : '';
+  const showDetail = PROBLEMS.has(v.health);
   const folder = v.folder && v.folder !== v.title ? `<span class="sep">·</span><span>${esc(v.folder)}</span>` : '';
-  const who = v.lastMessage ? (v.lastMessage.role === 'user' ? 'You' : v.tool === 'claude' ? 'Claude' : 'Codex') : '';
   const btns = [];
   if (primary) {
     btns.push(
@@ -549,9 +507,8 @@ function cardHtml(v) {
     <button class="card-tap" data-act="open" data-key="${esc(v.key)}">
       <div class="status"><span class="pulse"></span>${esc(HEALTH[v.health])}<span class="when">${esc(ago(v.lastActivityAt || v.startedAt || v.healthSince))}</span></div>
       <div class="title">${esc(v.title)}</div>
-      <div class="meta"><span>${esc(toolLabel(v))}</span>${folder}${rcChip(v)}</div>
-      ${showDetail ? `<div class="detail">${esc(v.detail)}${sub}</div>` : ''}
-      ${v.lastMessage ? `<div class="msg"><b>${who}:</b> ${esc(v.lastMessage.text)}</div>` : ''}
+      <div class="meta"><span>${esc(whereLabel(v))}</span>${folder}${rcChip(v)}</div>
+      ${showDetail ? `<div class="detail">${esc(v.detail)}</div>` : ''}
     </button>
     <div class="card-actions">${btns.join('')}</div>
   </article>`;
@@ -563,12 +520,11 @@ function appsHtml(apps, host) {
     .map((a) => {
       const busy = S.busy.has(`app:${a.id}`);
       const state = a.running ? 'Running' : a.installed ? 'Not running' : 'Not installed';
-      const extra = a.id === 'codex-daemon' && a.detail && a.detail !== 'not running' ? ` · ${a.detail}` : '';
       const btn = a.actions.length
         ? `<button class="btn small ${busy ? 'busy' : ''}" data-act="app" data-app="${a.id}">${busy ? 'Working…' : a.running ? 'Manage' : 'Start'}</button>`
         : '';
       return `<div class="app-row"><span class="dot ${a.running ? 'on' : ''}"></span>
-        <div class="name">${esc(a.name)}<small>${esc(state + extra)}</small></div>${btn}</div>`;
+        <div class="name">${esc(a.name)}<small>${esc(state)}</small></div>${btn}</div>`;
     })
     .join('');
   return `<div class="label">Apps on ${esc(host)}</div><div class="apps">${rows}</div>`;
@@ -641,7 +597,7 @@ function sheetBody(sheet) {
       .join('');
     return `<div class="sheet-head"><div class="status"><span class="dot ${a.running ? 'on' : ''}"></span> ${a.running ? 'Running' : 'Not running'}</div>
       <button class="icon-btn" data-act="close" aria-label="Close">${ICON.close}</button></div>
-      <h2>${esc(a.name)}</h2>${a.detail ? `<p class="meta">${esc(a.detail)}</p>` : ''}
+      <h2>${esc(a.name)}</h2>
       <div class="action-list">${items}</div>`;
   }
   const v = S.state?.sessions.find((s) => s.key === sheet.key);
@@ -651,25 +607,18 @@ function sheetBody(sheet) {
   }
   const busy = S.busy.has(v.key);
   const rcText =
-    v.tool !== 'claude'
-      ? 'Not used by Codex'
-      : v.rc.state === 'on'
-        ? 'Connected'
-        : v.rc.state === 'off'
-          ? v.rc.expected ? 'Not connected' : 'Off'
-          : v.rc.state === 'unknown' ? 'Unknown (Claude no longer lists this session)' : 'Session closed';
+    v.rc.state === 'on'
+      ? 'Connected'
+      : v.rc.state === 'off'
+        ? v.rc.expected ? 'Not connected' : 'Off'
+        : v.rc.state === 'unknown' ? 'Unknown (Claude no longer lists this session)' : 'Session closed';
   const facts = [
     ['Status', `${HEALTH[v.health]} since ${clock(v.healthSince)}`],
-    v.health !== v.activity ? ['Underneath', v.activityDetail] : null,
-    ['Where', toolLabel(v)],
+    ['Where', whereLabel(v)],
     v.cwd ? ['Folder', `<span class="mono">${esc(v.cwd)}</span>`, true] : null,
     ['Remote Control', v.rc.url ? `${esc(rcText)} · <a href="${esc(v.rc.url)}" target="_blank" rel="noopener">link</a>` : esc(rcText), true],
-    v.pendingTool ? ['Tool call', `${v.pendingTool.name}: ${v.pendingTool.summary}`] : null,
-    v.running?.length ? ['Running', v.running.join(', ')] : null,
     ['Last activity', `${clock(v.lastActivityAt)} (${ago(v.lastActivityAt)})`],
     ['Started', clock(v.startedAt)],
-    v.pid ? ['Process', String(v.pid)] : null,
-    v.sessionId ? ['Session ID', `<span class="mono">${esc(v.sessionId)}</span>`, true] : null,
   ].filter(Boolean);
   const factsHtml = facts.map(([k, val, raw]) => `<div><dt>${esc(k)}</dt><dd>${raw ? val : esc(val)}</dd></div>`).join('');
   const primary = primaryAction(v);
@@ -685,13 +634,11 @@ function sheetBody(sheet) {
       `<button class="action-item ${cls} ${busy ? 'busy' : ''}" data-act="sa" data-key="${esc(v.key)}" data-action="${act}"><b>${esc(info.label)}</b><span>${esc(info.desc)}</span></button>`,
     );
   }
-  const who = v.lastMessage ? (v.lastMessage.role === 'user' ? 'You' : v.tool === 'claude' ? 'Claude' : 'Codex') : '';
   return `<div class="sheet-head h-${v.health}"><div class="status"><span class="pulse"></span>${esc(HEALTH[v.health])}</div>
       <button class="icon-btn" data-act="close" aria-label="Close">${ICON.close}</button></div>
     <h2>${esc(v.title)}</h2>
     <div class="h-${v.health}"><div class="detail">${esc(v.detail)}</div></div>
     <div class="action-list">${items.join('')}</div>
-    ${v.lastMessage ? `<div class="quote"><b>${who} · ${esc(ago(v.lastMessage.at))}</b>${esc(v.lastMessage.text)}</div>` : ''}
     <dl class="facts">${factsHtml}</dl>`;
 }
 
@@ -712,33 +659,26 @@ function settingsHtml() {
         : 'This browser can’t receive notifications. On iPhone, open the app from your Home Screen (iOS 16.4 or later).'
     }</div></div>`;
   } else if (!device?.push) {
-    notify = `<div class="row"><div class="grow">Get an alert when Remote Control drops, a session gets stuck or crashes, or Claude needs your approval.</div></div>
+    notify = `<div class="row"><div class="grow">Get an alert when Remote Control drops or a session stops unexpectedly.</div></div>
       <div class="row"><button class="btn primary block" data-act="push-on">Turn on notifications</button></div>`;
   } else {
     const p = device.prefs || {};
     const toggle = (id, label, help) => `<div class="row"><div class="grow">${label}<small>${help}</small></div>
       <label class="toggle"><input type="checkbox" data-act="pref" data-pref="${id}" ${p[id] ? 'checked' : ''}><span></span><span class="sr">${label}</span></label></div>`;
-    notify = `${toggle('problems', 'Problems', 'Remote Control lost, stuck, or stopped unexpectedly')}
-      ${toggle('approval', 'Needs you', 'Claude or Codex is waiting for your approval or answer')}
-      ${toggle('finished', 'Finished', 'A session finished its work and is waiting for you')}
+    notify = `${toggle('problems', 'Problems', 'Remote Control lost, or a session stopped unexpectedly')}
       ${toggle('system', 'PC status', 'The PC woke up or came back online')}
       <div class="row"><button class="btn small" data-act="push-test">Send a test</button><span class="grow"></span><button class="btn small danger" data-act="push-off">Turn off</button></div>`;
   }
 
   const awake = settings?.keepAwake ?? 'off';
   const seg = (id, label) => `<button class="${awake === id ? 'on' : ''}" data-act="awake" data-mode="${id}">${label}</button>`;
-  const stuckOptions = [5, 10, 15, 20, 30, 45, 60, 90]
-    .map((m) => `<option value="${m}" ${settings?.stuckMinutes === m ? 'selected' : ''}>${m} min</option>`)
-    .join('');
 
   const pcGroup = settings
     ? `<div class="label">On the PC</div>
       <div class="group">
         <div class="row"><div class="grow">Keep the PC awake<small>${st.agent.awake ? 'Active now: the PC won’t sleep on its own.' : 'Stops Windows from sleeping by itself, so sessions stay reachable.'}</small></div></div>
         <div class="segmented">${seg('off', 'Off')}${seg('while-working', 'While working')}${seg('always', 'Always')}</div>
-        <div class="row"><div class="grow">Call it stuck after<small>No progress for this long while working</small></div>
-          <select data-act="stuck" aria-label="Stuck after">${stuckOptions}</select></div>
-        <div class="row"><div class="grow">Auto-reconnect<small>When a terminal Claude session loses Remote Control and is idle, reopen it automatically (at most 3 times an hour).</small></div>
+        <div class="row"><div class="grow">Auto-reconnect<small>When a terminal session loses Remote Control and is idle, reopen it with Remote Control after 2 minutes (at most 3 times an hour).</small></div>
           <label class="toggle"><input type="checkbox" data-act="auto" ${settings.autoReconnect ? 'checked' : ''}><span></span><span class="sr">Auto-reconnect</span></label></div>
       </div>
       <p class="help">“Always” or “While working” keeps the PC on but lets the screen turn off. Closing the lid or choosing Sleep still puts it to sleep.</p>`
@@ -1045,8 +985,6 @@ document.addEventListener('change', (e) => {
         S.who.device = device;
       })
       .catch((err) => toast(err.message, 'error'));
-  } else if (d.act === 'stuck') {
-    saveSettings({ stuckMinutes: Number(el.value) });
   } else if (d.act === 'auto') {
     saveSettings({ autoReconnect: el.checked });
   }

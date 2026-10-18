@@ -1,11 +1,11 @@
-// Small command-line companion: `npm run status`, `npm run pair`, `npm run stop`.
+// Command-line companion: `AgentMonitor.exe status|pair|stop` (or `npm run status|pair|stop` from source).
 import http from 'node:http';
 import QRCode from 'qrcode';
-import { loadConfig } from './config.ts';
+import type { Config } from './config.ts';
 
-const cfg = loadConfig();
+export const CLI_COMMANDS = new Set(['status', 'pair', 'stop']);
 
-function call(method: string, path: string): Promise<any> {
+function call(cfg: Config, method: string, path: string): Promise<any> {
   return new Promise((resolve, reject) => {
     const req = http.request(
       { host: '127.0.0.1', port: cfg.adminPort, path, method, headers: { 'X-Agent-Client': 'cli', 'Content-Length': 0 }, timeout: 15000 },
@@ -23,47 +23,45 @@ function call(method: string, path: string): Promise<any> {
         });
       },
     );
-    req.on('error', () => reject(new Error('Agent Monitor is not running. Start it with: npm start')));
+    req.on('error', () => reject(new Error('Agent Monitor is not running.')));
     req.on('timeout', () => req.destroy(new Error('timeout')));
     req.end();
   });
 }
 
-const ICON: Record<string, string> = {
-  dead: '✖', 'rc-lost': '⚠', stuck: '⏸', approval: '✋', working: '●', waiting: '○', ended: '·',
-};
+const ICON: Record<string, string> = { dead: '✖', 'rc-lost': '⚠', working: '●', waiting: '○', ended: '·' };
 
-async function main(): Promise<void> {
-  const cmd = process.argv[2] ?? 'status';
-  if (cmd === 'status') {
-    const s = await call('GET', '/api/state');
-    console.log(`${s.agent.host} · Agent Monitor ${s.agent.version} · phone URL: ${s.agent.publicUrl ?? '(Tailscale not set up yet)'}`);
-    for (const a of s.apps) console.log(`  ${a.running ? '●' : '○'} ${a.name}${a.detail ? ` (${a.detail})` : ''}`);
-    console.log('');
-    for (const v of s.sessions) {
-      const tool = `${v.tool === 'claude' ? 'Claude' : 'Codex'} ${v.host === 'cli' ? 'CLI' : 'app'}`;
-      console.log(`${ICON[v.health] ?? '?'} ${v.health.padEnd(8)} ${tool.padEnd(11)} ${v.title}`);
-      console.log(`  ${''.padEnd(19)} ${v.detail}${v.pid ? `  (pid ${v.pid})` : ''}`);
+/** Runs one command against the running agent; returns the process exit code. */
+export async function runCliCommand(cfg: Config, cmd: string): Promise<number> {
+  try {
+    if (cmd === 'status') {
+      const s = await call(cfg, 'GET', '/api/state');
+      console.log(`${s.agent.host} · Agent Monitor ${s.agent.version} · phone URL: ${s.agent.publicUrl ?? '(Tailscale not set up yet)'}`);
+      for (const a of s.apps) console.log(`  ${a.running ? '●' : '○'} ${a.name}`);
+      console.log('');
+      for (const v of s.sessions) {
+        const where = v.host === 'cli' ? 'Terminal' : 'Claude app';
+        const rc = v.rc.state === 'on' ? 'Remote Control on' : v.rc.expected ? 'Remote Control lost' : 'no Remote Control';
+        console.log(`${ICON[v.health] ?? '?'} ${v.health.padEnd(8)} ${where.padEnd(11)} ${v.title}`);
+        console.log(`  ${''.padEnd(19)} ${v.detail} · ${rc}${v.pid ? `  (pid ${v.pid})` : ''}`);
+      }
+      if (!s.sessions.length) console.log('No sessions right now.');
+    } else if (cmd === 'pair') {
+      const p = await call(cfg, 'POST', '/api/admin/pairing');
+      console.log(`Pairing code: ${p.code}  (valid for 15 minutes)`);
+      if (p.link) {
+        console.log(await QRCode.toString(p.link, { type: 'terminal', small: true }));
+        console.log(`Or open ${p.url} on the iPhone.`);
+      } else {
+        console.log('The phone address is not ready yet: set up Tailscale first (see the Phone setup page).');
+      }
+    } else if (cmd === 'stop') {
+      await call(cfg, 'POST', '/api/admin/shutdown');
+      console.log('Agent Monitor is stopping.');
     }
-    if (!s.sessions.length) console.log('No sessions right now.');
-  } else if (cmd === 'pair') {
-    const p = await call('POST', '/api/admin/pairing');
-    console.log(`Pairing code: ${p.code}  (valid for 15 minutes)`);
-    if (p.link) {
-      console.log(await QRCode.toString(p.link, { type: 'terminal', small: true }));
-      console.log(`Or open ${p.url} on the iPhone.`);
-    } else {
-      console.log('The phone address is not ready yet: set up Tailscale first (see README).');
-    }
-  } else if (cmd === 'stop') {
-    await call('POST', '/api/admin/shutdown');
-    console.log('Agent Monitor is stopping.');
-  } else {
-    console.log('Usage: node src/cli.ts [status|pair|stop]');
+    return 0;
+  } catch (e) {
+    console.error((e as Error).message);
+    return 1;
   }
 }
-
-main().catch((e) => {
-  console.error(e.message);
-  process.exit(1);
-});

@@ -21,7 +21,7 @@ function autoSetup(t: any, enabled = true) {
   const actions = { session: async (key: string, action: string) => (calls.push(`${action} ${key}`), { ok: true, message: 'ok' }) };
   const notifier = { send: async (_c: string, p: { body: string }) => (pushes.push(p.body), { sent: 1, failed: 0 }) };
   const auto = new AutoReconnect(store, actions as any, notifier as any, memoryLog());
-  const lost = (over = {}) => baseView({ key: 'claude:x', health: 'rc-lost', healthSince: Date.now() - 3 * MIN, actions: ['reconnect', 'stop'], ...over });
+  const lost = (over = {}) => baseView({ key: 'claude:x', health: 'rc-lost', healthSince: Date.now() - 3 * MIN, actions: ['reconnect'], ...over });
   return { auto, calls, pushes, lost, store };
 }
 
@@ -41,20 +41,26 @@ test('auto-reconnect: an idle terminal session that lost Remote Control 2+ minut
   assert.match(pushes[0], /reopened in Windows Terminal/);
 });
 
-test('auto-reconnect leaves alone: working, app, Codex, closed, other problems, and when off', async (t) => {
+test('auto-reconnect leaves alone: working or unknown, app sessions, closed, other states, and when off', async (t) => {
   const { auto, calls, lost, store } = autoSetup(t);
-  auto.onUpdate([
-    lost({ key: 'a', busy: true }),
-    lost({ key: 'b', host: 'desktop' }),
-    lost({ key: 'c', tool: 'codex' }),
+  const handled = auto.onUpdate([
+    lost({ key: 'a', busy: true, idle: false }),
+    lost({ key: 'b', idle: false }), // Claude no longer lists it: busy or idle is not known
+    lost({ key: 'c', host: 'desktop' }),
     lost({ key: 'd', alive: false }),
-    lost({ key: 'e', health: 'stuck' }),
-    lost({ key: 'f', actions: ['stop'] }),
+    lost({ key: 'e', health: 'dead' }),
+    lost({ key: 'f', actions: ['dismiss'] }),
   ]);
+  assert.deepEqual([...handled], [], 'so their normal alerts go out');
   store.data.settings.autoReconnect = false;
-  auto.onUpdate([lost()]);
+  assert.deepEqual([...auto.onUpdate([lost()])], [], 'switched off: nothing is handled automatically');
   await flush();
   assert.deepEqual(calls, []);
+});
+
+test('auto-reconnect claims the sessions it will fix, so the phone gets one alert instead of two', async (t) => {
+  const { auto, lost } = autoSetup(t);
+  assert.deepEqual([...auto.onUpdate([lost({ healthSince: Date.now() - 1 * MIN })])], ['claude:x'], 'claimed while it waits the 2 minutes');
 });
 
 test('auto-reconnect: at most once per 15 minutes and 3 times per hour per session', async (t) => {
@@ -137,9 +143,9 @@ test('keep awake reports honestly when the helper cannot hold the PC', async (t)
 
 test('settings saved by an older version get new defaults', (t) => {
   const file = path.join(tempDir(t), 'old.json');
-  fs.writeFileSync(file, JSON.stringify({ version: 1, devices: [], settings: { keepAwake: 'always' } }));
+  fs.writeFileSync(file, JSON.stringify({ version: 1, devices: [], settings: { keepAwake: 'always', stuckMinutes: 30 } }));
   const store = new Store(file, cfg.defaults);
-  assert.deepEqual(store.data.settings, { keepAwake: 'always', stuckMinutes: 15, autoReconnect: false });
+  assert.deepEqual(store.data.settings, { keepAwake: 'always', autoReconnect: false }, 'settings that no longer exist are dropped');
   assert.deepEqual(store.data.dismissed, {});
 });
 
@@ -155,13 +161,14 @@ test('a broken state file does not stop the agent', (t) => {
 
 test('config.json values override the defaults; paths can be overridden one by one', (t) => {
   const file = path.join(tempDir(t), 'config.json');
-  fs.writeFileSync(file, JSON.stringify({ phonePort: 9000, defaults: { stuckMinutes: 30 }, paths: { codexHome: 'X:\\codex' } }));
+  fs.writeFileSync(file, JSON.stringify({ phonePort: 9000, defaults: { autoReconnect: true, stuckMinutes: 30 }, paths: { claudeHome: 'X:\\claude' } }));
   const c = loadConfig(file);
   assert.equal(c.phonePort, 9000);
   assert.equal(c.adminPort, 7421);
-  assert.deepEqual(c.defaults, { keepAwake: 'off', stuckMinutes: 30, autoReconnect: false });
-  assert.equal(c.paths.codexHome, 'X:\\codex');
-  assert.ok(c.paths.claudeHome.endsWith('.claude') || !!process.env.CLAUDE_CONFIG_DIR);
+  assert.deepEqual(c.defaults, { keepAwake: 'off', autoReconnect: true });
+  assert.equal(c.paths.claudeHome, 'X:\\claude');
+  assert.ok(c.paths.claudeAppData.endsWith('Claude'));
+  assert.equal(c.paths.helperSource.endsWith('ProcHelper.cs'), true, 'from source, the helper is built from its C# file');
 });
 
 test('AGENT_MONITOR_CONFIG points the agent at another config file', (t) => {

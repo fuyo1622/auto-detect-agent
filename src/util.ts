@@ -40,6 +40,16 @@ export function writeJsonAtomic(file: string, data: unknown): void {
   fs.renameSync(tmp, file);
 }
 
+export function mtimeOf(file: string): number | undefined {
+  return statSafe(file)?.mtimeMs;
+}
+
+export function maxDefined(...values: (number | undefined)[]): number | undefined {
+  let best: number | undefined;
+  for (const v of values) if (v !== undefined && Number.isFinite(v) && (best === undefined || v > best)) best = v;
+  return best;
+}
+
 export function statSafe(file: string): fs.Stats | undefined {
   try {
     return fs.statSync(file);

@@ -132,33 +132,44 @@ test('a new problem is pushed once, after it has lasted alertDelaySeconds', asyn
   phone('a');
   notifier.onUpdate([]);
   const since = Date.now() - 5000;
-  notifier.onUpdate([problem('stuck', 0, { healthSince: since })]);
+  notifier.onUpdate([problem('rc-lost', 0, { healthSince: since })]);
   await settle();
   assert.equal(sent.length, 0, 'too new: it may fix itself');
   const old = since - cfg.alertDelaySeconds * 1000;
-  notifier.onUpdate([problem('stuck', 0, { healthSince: old })]);
+  notifier.onUpdate([problem('rc-lost', 0, { healthSince: old })]);
   await settle();
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].payload.title, 'Claude · Task stuck');
-  assert.equal(sent[0].payload.body, 'Looks stuck. detail stuck');
-  assert.equal(sent[0].payload.url, '/#s=claude%3Astuck');
-  notifier.onUpdate([problem('stuck', 0, { healthSince: old })]);
+  assert.equal(sent[0].payload.title, 'Task rc-lost');
+  assert.equal(sent[0].payload.body, 'Remote Control lost. detail rc-lost');
+  assert.equal(sent[0].payload.url, '/#s=claude%3Arc-lost');
+  notifier.onUpdate([problem('rc-lost', 0, { healthSince: old })]);
   await settle();
   assert.equal(sent.length, 1, 'not repeated');
   notifier.onUpdate([]);
-  notifier.onUpdate([problem('stuck', 0, { healthSince: old + 1 })]);
+  notifier.onUpdate([problem('rc-lost', 0, { healthSince: old + 1 })]);
   await settle();
   assert.equal(sent.length, 2, 'a problem that comes back is pushed again');
 });
 
-test('"needs you" is pushed right away, in its own category', async () => {
-  phone('wants-all');
-  phone('no-approvals', { approval: false });
+test('a problem auto-reconnect is taking care of gets no separate alert', async () => {
+  phone('a');
   notifier.onUpdate([]);
-  notifier.onUpdate([problem('approval', 0)]);
+  const lost = problem('rc-lost', 3600_000);
+  notifier.onUpdate([lost], new Set([lost.key]));
+  await settle();
+  assert.equal(sent.length, 0, 'auto-reconnect reports the result itself');
+  notifier.onUpdate([lost]);
+  await settle();
+  assert.equal(sent.length, 1, 'once it gives up (or is turned off), the alert goes out');
+});
+
+test('phones that turned off problem alerts do not get them', async () => {
+  phone('wants-all');
+  phone('quiet', { problems: false });
+  notifier.onUpdate([]);
+  notifier.onUpdate([problem('dead', 3600_000)]);
   await settle();
   assert.deepEqual(sent.map((s) => s.device), ['QF-wants-all']);
-  assert.match(sent[0].payload.body, /^Needs you\./);
 });
 
 test('states that do not deserve a push are skipped', async () => {
@@ -167,21 +178,6 @@ test('states that do not deserve a push are skipped', async () => {
   notifier.onUpdate([problem('dead', 3600_000, { notify: false }), problem('working', 3600_000), problem('waiting', 3600_000)]);
   await settle();
   assert.equal(sent.length, 0);
-});
-
-test('"finished" goes only to phones that asked for it, after real work', async () => {
-  phone('default');
-  phone('finished', { finished: true });
-  notifier.onUpdate([]);
-  const view = baseView({ key: 'codex:1', tool: 'codex', title: 'Refactor', health: 'waiting', lastMessage: { role: 'assistant', text: 'All done.' } });
-  notifier.onTransition({ key: view.key, from: 'working', to: 'waiting', view, previous: { ...view, health: 'working', healthSince: Date.now() - 5000 } });
-  await settle();
-  assert.equal(sent.length, 0, 'a 5-second turn is not worth a push');
-  notifier.onTransition({ key: view.key, from: 'working', to: 'waiting', view, previous: { ...view, health: 'working', healthSince: Date.now() - 60_000 } });
-  await settle();
-  assert.deepEqual(sent.map((s) => s.device), ['QF-finished']);
-  assert.equal(sent[0].payload.title, 'Codex · Refactor');
-  assert.equal(sent[0].payload.body, 'Done: All done.');
 });
 
 test('a phone that dropped its subscription (404/410) is cleaned up', async () => {
